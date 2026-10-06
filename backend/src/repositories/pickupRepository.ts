@@ -58,6 +58,14 @@ export const pickupRepository = {
     return r.rows;
   },
 
+  async listForDonation(db: Queryable, donationId: string): Promise<PickupRow[]> {
+    const r = await db.query<PickupRow>(
+      `${SELECT} WHERE m.donation_id = $1 ORDER BY p.created_at DESC`,
+      [donationId],
+    );
+    return r.rows;
+  },
+
   async listForDonor(db: Queryable, donorId: string): Promise<PickupRow[]> {
     const r = await db.query<PickupRow>(
       `${SELECT} WHERE d.donor_id = $1 ORDER BY p.created_at DESC`,

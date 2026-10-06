@@ -3,6 +3,7 @@ import { assertDonationTransition, assertInStatus } from '../domain/stateMachine
 import { donationRepository, type DonationRow } from '../repositories/donationRepository';
 import { matchRepository } from '../repositories/matchRepository';
 import { pickupRepository } from '../repositories/pickupRepository';
+import { ratingRepository } from '../repositories/ratingRepository';
 import { reviewRepository } from '../repositories/reviewRepository';
 import { userRepository } from '../repositories/userRepository';
 import { forbidden, notFound } from '../utils/errors';
@@ -79,16 +80,51 @@ export const donationService = {
     if (requester.role === 'DONOR' && donation.donor_id !== requester.userId) {
       throw forbidden('Donors can only view their own donations.');
     }
-    const [reviews, matches] = await Promise.all([
+    const [reviews, allMatches, allPickups] = await Promise.all([
       reviewRepository.listByDonation(db, donationId),
       matchRepository.listByDonation(db, donationId),
+      pickupRepository.listForDonation(db, donationId),
     ]);
-    const pickups = [];
-    for (const m of matches) {
-      const list = await pickupRepository.listForRecipient(db, m.recipient_id);
-      pickups.push(...list.filter((p) => p.match_id === m.match_id));
+
+    if (requester.role !== 'RECIPIENT') {
+      return { donation, reviews, matches: allMatches, pickups: allPickups };
     }
+
+    // A recipient may only open a donation that was offered to them, and sees
+    // only its own offer and pickup — never other organisations' scores or the
+    // contact details on someone else's pickup.
+    const matches = allMatches.filter((m) => m.recipient_id === requester.userId);
+    if (!matches.length) throw forbidden('This donation was not offered to your organisation.');
+    const pickups = allPickups.filter((p) => p.recipient_id === requester.userId);
     return { donation, reviews, matches, pickups };
+  },
+
+  /**
+   * Status-clarity rating (proposal secondary metric): the donation's donor,
+   * or a recipient that accepted it, rates 1–5 how clear the status timeline
+   * was. Re-rating replaces the earlier score.
+   */
+  async rateStatus(db: Queryable, donationId: string, actor: { userId: string; role: string }, body: unknown) {
+    const b = asObject(body);
+    const rating = requiredInt(b, 'rating', 1, 5);
+    const comment = optionalString(b, 'comment', 1000);
+
+    const donation = await donationRepository.findById(db, donationId);
+    if (!donation) throw notFound(`Donation '${donationId}' not found.`);
+
+    if (actor.role === 'DONOR') {
+      if (donation.donor_id !== actor.userId) throw forbidden('Donors can only rate their own donations.');
+    } else if (actor.role === 'RECIPIENT') {
+      const matches = await matchRepository.listByDonation(db, donationId);
+      const tookPart = matches.some((m) => m.recipient_id === actor.userId && m.status === 'ACCEPTED');
+      if (!tookPart) throw forbidden('Only the organisation that accepted this donation can rate it.');
+    } else {
+      throw forbidden('Only donors and recipients rate status clarity.');
+    }
+
+    return ratingRepository.upsert(db, {
+      donationId, userId: actor.userId, role: actor.role as 'DONOR' | 'RECIPIENT', rating, comment,
+    });
   },
 
   /** Donor cancels an eligible donation (pre-pickup). */

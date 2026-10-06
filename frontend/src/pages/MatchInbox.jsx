@@ -6,26 +6,27 @@ import { foodLabel, dateTimeOf, minutesUntil } from '../lib/format.js'
 /**
  * Recipient's match inbox — accept or decline an offer.
  *
- * GET /matches/inbox returns match rows only: score, distance and deadline, but
- * nothing about the food itself. An organisation cannot decide on that, so each
- * match's donation is fetched alongside it. That is an N+1; the inbox query
- * joining the donation would remove it. Raised with Person B.
+ * GET /matches/inbox embeds each offer's donation under `match.donation`
+ * (food type, quantity, pickup address, deadline). The per-donation fetch
+ * below is only a fallback for an older backend that does not embed it.
  */
 export function MatchInbox() {
   const { data, loading, error, reload } = useApi(() => api.matchInbox(), [])
-  const [donations, setDonations] = useState({})
+  const [fetched, setFetched] = useState({})
   useTicker(15000)
 
   const matches = data?.matches ?? []
   const pending = matches.filter((m) => m.status === 'PENDING')
+  const embedded = Object.fromEntries(pending.filter((m) => m.donation).map((m) => [m.donation_id, m.donation]))
+  const donations = { ...fetched, ...embedded }
 
   useEffect(() => {
     let alive = true
-    const ids = [...new Set(pending.map((m) => m.donation_id))]
+    const ids = [...new Set(pending.filter((m) => !m.donation).map((m) => m.donation_id))]
     if (!ids.length) return
     Promise.all(ids.map((id) =>
       api.donationDetail(id).then((r) => [id, r.donation]).catch(() => [id, null])
-    )).then((pairs) => { if (alive) setDonations(Object.fromEntries(pairs)) })
+    )).then((pairs) => { if (alive) setFetched(Object.fromEntries(pairs)) })
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data])

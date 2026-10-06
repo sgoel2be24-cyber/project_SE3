@@ -264,12 +264,19 @@ export const matchingService = {
   },
 
   async inbox(db: Queryable, recipientUserId: string) {
-    return matchRepository.listByRecipient(db, recipientUserId);
+    return matchRepository.inboxForRecipient(db, recipientUserId);
   },
 
-  async getMatch(db: Queryable, matchId: string) {
+  async getMatch(db: Queryable, matchId: string, actor: { userId: string; role: string }) {
     const match = await matchRepository.findById(db, matchId);
     if (!match) throw notFound(`Match '${matchId}' not found.`);
+    if (actor.role === 'RECIPIENT' && match.recipient_id !== actor.userId) {
+      throw forbidden('This match belongs to another recipient.');
+    }
+    if (actor.role === 'DONOR') {
+      const donation = await donationRepository.findById(db, match.donation_id);
+      if (donation?.donor_id !== actor.userId) throw forbidden('This match is for another donor\'s donation.');
+    }
     return match;
   },
 

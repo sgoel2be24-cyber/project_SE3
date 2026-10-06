@@ -57,34 +57,35 @@ against a development database.
 Responses are database rows in snake_case and the client reads them as-is. There
 is no renaming layer on purpose: a silent rename is where drift hides.
 
-The one normalisation is the user object, because `POST /auth/login` returns it
-camelCased (`userId`) while `GET /auth/me` returns the row (`user_id`). That is
-handled in `src/context/Session.jsx` so no screen has to know which call it came
-from — worth reconciling on the backend eventually.
+The user object is the same on every auth call: register, login and
+`GET /auth/me` all return the `users` row in snake_case (`user_id`).
+`normalizeUser` in `src/context/Session.jsx` still accepts `userId`, so it
+also works against an older backend.
+
+## Resolved by Person B
+
+- **Inbox donation detail.** `GET /matches/inbox` now embeds each offer's
+  donation under `match.donation`. `MatchInbox.jsx` uses it and only falls back
+  to per-donation fetches when it is missing.
+- **User shape.** Login, register and `/auth/me` return the same user object.
+- **Time-to-match trend.** `GET /impact/ttm?bucket=day&days=30` returns
+  `{bucket, days, targetSeconds, points[{bucket, medianSeconds, avgSeconds, n}]}`.
+- **Status-clarity rating.** `PUT /donations/:id/rating` with
+  `{rating: 1-5, comment?}`, sent by the donor or by the recipient that
+  accepted. Averages appear in `/impact/summary` as `statusClarity`.
+- **Access control.** A recipient only sees donations offered to it, and only
+  its own offer. Matches and pickups are visible to their two parties and to
+  admins only.
+
+Frontend UI still to build: the TTM trend chart on the impact dashboard, and a
+1–5 rating control on the donation detail page.
 
 ## Open items for Person B
 
-1. **`GET /matches/inbox` returns no donation detail.** A recipient sees a score,
-   a distance and a deadline, but not what the food is or how much — which is
-   what they actually decide on. The inbox therefore fetches every match's
-   donation separately (an N+1). Joining `food_type`, `quantity_servings` and
-   `pickup_address` into the inbox query would remove it. The contract check
-   reports this as an advisory.
-
-2. **No handover verification.** `POST /pickups/:id/picked-up` is called by the
-   recipient, and so is `/complete` — so one party drives both ends and the two
+1. **No handover verification.** `POST /pickups/:id/picked-up` is called by the
+   recipient, and so is `/complete`, so one party drives both ends and the two
    timestamps are not independent evidence that food changed hands. A pickup
-   code issued to the collector and verified by the donor would fix it. Until
-   then the pickup timestamps should be described as self-reported, not
-   measured, in the report.
-
-3. **No time series for time-to-match.** `/impact/summary` gives one average and
-   one median. The dashboard can show the current figure against the 20-minute
-   target but cannot show whether it is improving, which is the thing the
-   proposal set out to demonstrate. A `GET /impact/ttm?bucket=day` returning
-   `{bucket, medianSeconds, n}` would cover it.
-
-4. **No endpoint for the status-clarity rating.** The proposal lists donor- and
-   recipient-reported clarity of the status timeline (1–5) as a secondary
-   evaluation metric. There is nowhere to send it, so it currently cannot be
-   collected at all.
+   code issued to the collector and verified by the donor would fix it. That
+   needs a matching frontend change, so it is planned for the next iteration.
+   Until then the pickup timestamps should be described as self-reported in
+   the report.

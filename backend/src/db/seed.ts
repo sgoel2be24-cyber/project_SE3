@@ -30,7 +30,7 @@ const HUB = { latitude: 30.3548, longitude: 76.3626 }; // donor hub — Thapar I
 
 async function wipe(db: Queryable): Promise<void> {
   await db.query(
-    `TRUNCATE notifications, pickups, matches, donation_reviews, matching_waitlist,
+    `TRUNCATE status_ratings, notifications, pickups, matches, donation_reviews, matching_waitlist,
              donations, recipient_organizations, donors, users RESTART IDENTITY CASCADE`,
   );
 }

@@ -14,6 +14,17 @@ import { notificationService } from './notificationService';
  *   Pickup PICKED_UP -> COMPLETED   &&  Donation PICKED_UP -> COMPLETED
  * Both state changes happen in one transaction so they can never diverge.
  */
+type Actor = { userId: string; role: string };
+
+/** Only the two parties to a pickup (its recipient and the donation's donor)
+ *  and admins may see or change it. */
+function assertParty(actor: Actor, recipientId: string, donorId: string): void {
+  if (actor.role === 'ADMIN') return;
+  if (actor.role === 'RECIPIENT' && recipientId === actor.userId) return;
+  if (actor.role === 'DONOR' && donorId === actor.userId) return;
+  throw forbidden('This pickup belongs to another donation or organisation.');
+}
+
 export const pickupService = {
   async listMine(db: Queryable, userId: string, role: string) {
     if (role === 'RECIPIENT') return pickupRepository.listForRecipient(db, userId);
@@ -23,9 +34,12 @@ export const pickupService = {
     return r.rows;
   },
 
-  async get(db: Queryable, pickupId: string) {
+  async get(db: Queryable, pickupId: string, actor: Actor) {
     const pickup = await pickupRepository.findById(db, pickupId);
     if (!pickup) throw notFound(`Pickup '${pickupId}' not found.`);
+    const donation = await donationRepository.findById(db, pickup.donation_id!);
+    if (!donation) throw notFound('Donation for this pickup no longer exists.');
+    assertParty(actor, pickup.recipient_id!, donation.donor_id);
     return pickup;
   },
 
@@ -35,11 +49,9 @@ export const pickupService = {
       if (!pickup) throw notFound(`Pickup '${pickupId}' not found.`);
       const match = await matchRepository.findByIdForUpdate(tx, pickup.match_id);
       if (!match) throw notFound('Match for this pickup no longer exists.');
-      if (actor.role === 'RECIPIENT' && match.recipient_id !== actor.userId) {
-        throw forbidden('This pickup belongs to another recipient.');
-      }
       const donation = await donationRepository.findByIdForUpdate(tx, match.donation_id);
       if (!donation) throw notFound('Donation for this pickup no longer exists.');
+      assertParty(actor, match.recipient_id, donation.donor_id);
 
       assertPickupTransition(pickup.status, 'PICKED_UP');
       assertDonationTransition(donation.status, 'PICKED_UP');
@@ -61,11 +73,9 @@ export const pickupService = {
       if (!pickup) throw notFound(`Pickup '${pickupId}' not found.`);
       const match = await matchRepository.findByIdForUpdate(tx, pickup.match_id);
       if (!match) throw notFound('Match for this pickup no longer exists.');
-      if (actor.role === 'RECIPIENT' && match.recipient_id !== actor.userId) {
-        throw forbidden('This pickup belongs to another recipient.');
-      }
       const donation = await donationRepository.findByIdForUpdate(tx, match.donation_id);
       if (!donation) throw notFound('Donation for this pickup no longer exists.');
+      assertParty(actor, match.recipient_id, donation.donor_id);
 
       assertPickupTransition(pickup.status, 'COMPLETED');
       assertDonationTransition(donation.status, 'COMPLETED');

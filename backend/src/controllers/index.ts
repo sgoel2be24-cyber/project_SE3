@@ -34,6 +34,8 @@ export function donationController(db: Queryable) {
       res.json(await donationService.getDetail(db, req.params.id!, req.user)),
     cancel: async (req: Request, res: Response) =>
       res.json({ donation: await donationService.cancelDonation(db, req.params.id!, req.user.userId) }),
+    rate: async (req: Request, res: Response) =>
+      res.json({ rating: await donationService.rateStatus(db, req.params.id!, req.user, req.body) }),
   };
 }
 
@@ -59,7 +61,7 @@ export function matchController(db: Queryable) {
     inbox: async (req: Request, res: Response) =>
       res.json({ matches: await matchingService.inbox(db, req.user.userId) }),
     detail: async (req: Request, res: Response) =>
-      res.json({ match: await matchingService.getMatch(db, req.params.id!) }),
+      res.json({ match: await matchingService.getMatch(db, req.params.id!, req.user) }),
     accept: async (req: Request, res: Response) =>
       res.json(await matchingService.acceptMatch(db, req.params.id!, req.user.userId)),
     reject: async (req: Request, res: Response) =>
@@ -72,7 +74,7 @@ export function pickupController(db: Queryable) {
     mine: async (req: Request, res: Response) =>
       res.json({ pickups: await pickupService.listMine(db, req.user.userId, req.user.role) }),
     detail: async (req: Request, res: Response) =>
-      res.json({ pickup: await pickupService.get(db, req.params.id!) }),
+      res.json({ pickup: await pickupService.get(db, req.params.id!, req.user) }),
     pickedUp: async (req: Request, res: Response) =>
       res.json({ pickup: await pickupService.markPickedUp(db, req.params.id!, req.user) }),
     complete: async (req: Request, res: Response) =>
@@ -98,5 +100,6 @@ export function notificationController(db: Queryable) {
 export function impactController(db: Queryable) {
   return {
     summary: async (_req: Request, res: Response) => res.json(await impactService.summary(db)),
+    ttm: async (req: Request, res: Response) => res.json(await impactService.ttmSeries(db, req.query)),
   };
 }

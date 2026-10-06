@@ -244,8 +244,9 @@ await check('GET /api/matches/inbox returns the recipient\'s own matches', async
 
 await check('Match rows carry enough to render an offer without a second call', async () => {
   must(ctx.ourMatch, 'no pending match for this account to inspect')
-  must(ctx.ourMatch.quantity_servings != null || ctx.ourMatch.food_type != null,
-       'match rows carry no donation detail, so the inbox must fetch each donation separately (N+1)')
+  const d = ctx.ourMatch.donation
+  must(d && d.quantity_servings != null && d.food_type != null,
+       'match rows carry no embedded donation, so the inbox must fetch each donation separately (N+1)')
   return 'donation joined'
 }, { required: false })
 

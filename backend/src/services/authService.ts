@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import { getPool, withTransaction, type Queryable } from '../db/pool';
 import { DONOR_TYPES, ORGANIZATION_TYPES, USER_ROLES } from '../domain/enums';
 import { signToken, type AuthUser } from '../middleware/authenticate';
-import { userRepository } from '../repositories/userRepository';
+import { userRepository, type UserRow } from '../repositories/userRepository';
 import { badRequest, conflict, unauthorized } from '../utils/errors';
 import {
   asObject,
@@ -18,6 +18,19 @@ import {
 
 function toAuthUser(row: { user_id: string; email: string; name: string; role: AuthUser['role'] }): AuthUser {
   return { userId: row.user_id, email: row.email, name: row.name, role: row.role };
+}
+
+/** The user row without its password hash. Every auth endpoint (register,
+ *  login, me, profile) returns the user in this one snake_case shape. */
+function toPublicUser(row: UserRow): Omit<UserRow, 'password_hash'> {
+  const { password_hash: _omit, ...safe } = row;
+  return safe;
+}
+
+async function loadProfile(db: Queryable, user: UserRow) {
+  if (user.role === 'DONOR') return userRepository.getDonor(db, user.user_id);
+  if (user.role === 'RECIPIENT') return userRepository.getRecipient(db, user.user_id);
+  return null;
 }
 
 /** UML User operations: register(), login(), updateProfile(). */
@@ -66,8 +79,7 @@ export const authService = {
         });
       }
 
-      const auth = toAuthUser(user);
-      return { user: { ...auth, phone: user.phone, address: user.address }, profile, token: signToken(auth) };
+      return { user: toPublicUser(user), profile, token: signToken(toAuthUser(user)) };
     });
   },
 
@@ -80,21 +92,17 @@ export const authService = {
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       throw unauthorized('Invalid email or password.');
     }
-    const auth = toAuthUser(user);
-    return { user: auth, token: signToken(auth) };
+    return {
+      user: toPublicUser(user),
+      profile: await loadProfile(db, user),
+      token: signToken(toAuthUser(user)),
+    };
   },
 
   async getProfile(db: Queryable, userId: string) {
     const user = await userRepository.findById(db, userId);
     if (!user) throw unauthorized('Account no longer exists.');
-    const profile =
-      user.role === 'DONOR'
-        ? await userRepository.getDonor(db, userId)
-        : user.role === 'RECIPIENT'
-          ? await userRepository.getRecipient(db, userId)
-          : null;
-    const { password_hash: _omit, ...safe } = user;
-    return { user: safe, profile };
+    return { user: toPublicUser(user), profile: await loadProfile(db, user) };
   },
 
   async updateProfile(db: Queryable, userId: string, body: unknown) {
@@ -126,8 +134,7 @@ export const authService = {
       profile = await userRepository.getDonor(db, userId);
     }
 
-    const { password_hash: _omit, ...safe } = updated!;
-    return { user: safe, profile };
+    return { user: toPublicUser(updated!), profile };
   },
 };
 

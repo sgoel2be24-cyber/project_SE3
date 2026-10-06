@@ -39,7 +39,7 @@ export async function ensureMigrated(): Promise<void> {
 export async function resetWithFixtures(): Promise<FixtureIds> {
   const db = testPool();
   await db.query(
-    `TRUNCATE notifications, pickups, matches, donation_reviews, matching_waitlist,
+    `TRUNCATE status_ratings, notifications, pickups, matches, donation_reviews, matching_waitlist,
              donations, recipient_organizations, donors, users RESTART IDENTITY CASCADE`,
   );
 

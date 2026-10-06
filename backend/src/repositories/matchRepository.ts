@@ -18,6 +18,21 @@ export interface MatchRow {
   responded_at: string | null;
 }
 
+export interface InboxRow extends MatchRow {
+  donation: {
+    donation_id: string;
+    food_type: string;
+    description: string | null;
+    quantity_servings: number;
+    pickup_address: string | null;
+    pickup_start: string | null;
+    pickup_end: string | null;
+    expires_at: string;
+    status: string;
+    donor_name: string;
+  };
+}
+
 const SELECT = `
   SELECT m.*, u.name AS recipient_name
     FROM matches m
@@ -60,6 +75,37 @@ export const matchRepository = {
   async listByRecipient(db: Queryable, recipientId: string): Promise<MatchRow[]> {
     const r = await db.query<MatchRow>(
       `${SELECT} WHERE m.recipient_id = $1 ORDER BY m.created_at DESC`,
+      [recipientId],
+    );
+    return r.rows;
+  },
+
+  /**
+   * Recipient inbox: each offer carries the donation it is for, nested under
+   * `donation` with the same field names as GET /donations/:id, so the inbox
+   * can render what the food is without one extra request per offer.
+   */
+  async inboxForRecipient(db: Queryable, recipientId: string): Promise<InboxRow[]> {
+    const r = await db.query<InboxRow>(
+      `SELECT m.*, ru.name AS recipient_name,
+              json_build_object(
+                'donation_id',       d.donation_id,
+                'food_type',         d.food_type,
+                'description',       d.description,
+                'quantity_servings', d.quantity_servings,
+                'pickup_address',    d.pickup_address,
+                'pickup_start',      d.pickup_start,
+                'pickup_end',        d.pickup_end,
+                'expires_at',        d.expires_at,
+                'status',            d.status,
+                'donor_name',        du.name
+              ) AS donation
+         FROM matches m
+         JOIN users ru     ON ru.user_id = m.recipient_id
+         JOIN donations d  ON d.donation_id = m.donation_id
+         JOIN users du     ON du.user_id = d.donor_id
+        WHERE m.recipient_id = $1
+        ORDER BY m.created_at DESC`,
       [recipientId],
     );
     return r.rows;

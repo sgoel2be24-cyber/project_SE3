@@ -45,6 +45,7 @@ export function buildRouter(db: Queryable): Router {
   r.get('/donations/mine', authenticate, requireRole('DONOR'), wrap(donations.mine));
   r.get('/donations/:id', authenticate, wrap(donations.detail));
   r.post('/donations/:id/cancel', authenticate, requireRole('DONOR'), wrap(donations.cancel));
+  r.put('/donations/:id/rating', authenticate, requireRole('DONOR', 'RECIPIENT'), wrap(donations.rate));
 
   // ---- /api/admin (donation review + operations)
   r.get('/admin/donations/pending', authenticate, requireRole('ADMIN'), wrap(admin.pending));
@@ -72,6 +73,7 @@ export function buildRouter(db: Queryable): Router {
 
   // ---- /api/impact (dashboard)
   r.get('/impact/summary', authenticate, wrap(impact.summary));
+  r.get('/impact/ttm', authenticate, wrap(impact.ttm));
 
   return r;
 }

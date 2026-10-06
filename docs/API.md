@@ -13,8 +13,10 @@ Roles: `DONOR`, `RECIPIENT`, `ADMIN`.
 | Method & path | Role | Body → Response |
 |---|---|---|
 | `POST /auth/register` | public | `{name,email,password(≥8),role,phone?}` + donor: `{donorType}` or recipient: `{organizationType,servingCapacity,serviceRadiusKm?,foodPreferences?[],dietaryRestrictions?[],latitude,longitude}` → `201 {user,profile,token}` |
-| `POST /auth/login` | public | `{email,password}` → `{user,token}` |
+| `POST /auth/login` | public | `{email,password}` → `{user,profile,token}` |
 | `GET /auth/me` | any | → `{user,profile}` |
+
+Every auth endpoint returns `user` in the same shape: the `users` row in snake_case (`user_id, name, email, phone, role, address, latitude, longitude, created_at`), never the password hash.
 | `PATCH /auth/profile` | any | profile fields (recipients: capacity/radius/preferences/active) → `{user,profile}` |
 
 ## /api/donations
@@ -23,8 +25,9 @@ Roles: `DONOR`, `RECIPIENT`, `ADMIN`.
 |---|---|---|
 | `POST /donations` | DONOR | `{foodType,description?,quantityServings,latitude+longitude \| pickupAddress,expiresAt \| expiresInHours,pickupStart?,pickupEnd?}` → `201 {donation(PENDING_REVIEW), locationSource}` |
 | `GET /donations/mine` | DONOR | own donations, newest first |
-| `GET /donations/:id` | owner / ADMIN / matched RECIPIENT | `{donation,reviews[],matches[],pickups[]}` — audit trail for the timeline UI |
+| `GET /donations/:id` | owner / ADMIN / matched RECIPIENT | `{donation,reviews[],matches[],pickups[]}` — audit trail for the timeline UI. A recipient only gets donations offered to it (else `403`), and `matches`/`pickups` are filtered to its own. |
 | `POST /donations/:id/cancel` | DONOR (owner) | only from `PENDING_REVIEW`/`POSTED` |
+| `PUT /donations/:id/rating` | DONOR (owner) / RECIPIENT (accepted it) | `{rating: 1-5, comment?}` → `{rating}`. Status-clarity rating; re-submitting replaces the earlier one. |
 
 ## /api/admin
 
@@ -40,8 +43,8 @@ Roles: `DONOR`, `RECIPIENT`, `ADMIN`.
 
 | Method & path | Role | Notes |
 |---|---|---|
-| `GET /matches/inbox` | RECIPIENT | own match offers, newest first |
-| `GET /matches/:id` | involved party / ADMIN | match detail with score breakdown |
+| `GET /matches/inbox` | RECIPIENT | own match offers, newest first. Each offer embeds `donation: {donation_id, food_type, description, quantity_servings, pickup_address, pickup_start, pickup_end, expires_at, status, donor_name}`. |
+| `GET /matches/:id` | the match's recipient / the donation's donor / ADMIN | match detail with score breakdown; anyone else `403` |
 | `POST /matches/:id/accept` | RECIPIENT (owner of match) | `PENDING→ACCEPTED`; creates **Pickup (SCHEDULED)** with scheduledAt + contactDetails; donation stays `MATCHED` |
 | `POST /matches/:id/reject` | RECIPIENT (owner) | `PENDING→REJECTED`, donation requeued `MATCHED→POSTED`, rejecter excluded from immediate retry, fresh matching cycle runs → `{rematched, newMatch, cycle}` |
 
@@ -50,9 +53,9 @@ Roles: `DONOR`, `RECIPIENT`, `ADMIN`.
 | Method & path | Role | Notes |
 |---|---|---|
 | `GET /pickups/mine` | any | recipient/donor-scoped list |
-| `GET /pickups/:id` | involved / ADMIN | detail |
-| `POST /pickups/:id/picked-up` | RECIPIENT/ADMIN | `SCHEDULED→PICKED_UP` **and** donation `MATCHED→PICKED_UP` (one transaction) |
-| `POST /pickups/:id/complete` | RECIPIENT/ADMIN | `PICKED_UP→COMPLETED` **and** donation `→COMPLETED`; donor meal counter + recipient capacity release in the same transaction |
+| `GET /pickups/:id` | the pickup's recipient / the donation's donor / ADMIN | detail; anyone else `403` |
+| `POST /pickups/:id/picked-up` | the two parties / ADMIN | `SCHEDULED→PICKED_UP` **and** donation `MATCHED→PICKED_UP` (one transaction) |
+| `POST /pickups/:id/complete` | the two parties / ADMIN | `PICKED_UP→COMPLETED` **and** donation `→COMPLETED`; donor meal counter + recipient capacity release in the same transaction |
 
 ## /api/notifications
 
@@ -71,7 +74,8 @@ REDISTRIBUTION_COMPLETED, MATCH_EXPIRED`. In-app only (no SMS/email).
 
 | Method & path | Role | Notes |
 |---|---|---|
-| `GET /impact/summary` | any | `{mealsRedistributed, completedDonations, wasteDivertedKg, wasteAssumptionKgPerServing, timeToMatch{avgSeconds,medianSeconds,samples}, unmatchedCount, unmatchedRate, waitlistedCount, expiredCount, topDonors[]}` — all computed from persisted rows/timestamps |
+| `GET /impact/summary` | any | `{mealsRedistributed, completedDonations, wasteDivertedKg, wasteAssumptionKgPerServing, timeToMatch{avgSeconds,medianSeconds,samples}, unmatchedCount, unmatchedRate, waitlistedCount, expiredCount, statusClarity{donor{avg,n},recipient{avg,n}}, topDonors[]}` — all computed from persisted rows/timestamps |
+| `GET /impact/ttm?bucket=day\|week&days=30` | any | time-to-match trend by the day/week donations were posted: `{bucket, days, targetSeconds: 1200, points[{bucket: 'YYYY-MM-DD', medianSeconds, avgSeconds, n}]}` |
 
 ## Matching service (separate process, :8000)
 

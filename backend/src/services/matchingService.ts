@@ -1,0 +1,279 @@
+import { config } from '../config';
+import { withTransaction, type Queryable } from '../db/pool';
+import { assertDonationTransition, assertInStatus, assertMatchTransition } from '../domain/stateMachines';
+import {
+  runMatchingCycle,
+  type MatcherRequest,
+  type MatcherResponse,
+} from '../matching/matcherClient';
+import { donationRepository, type DonationRow } from '../repositories/donationRepository';
+import { matchRepository } from '../repositories/matchRepository';
+import { pickupRepository } from '../repositories/pickupRepository';
+import { waitlistRepository } from '../repositories/miscRepository';
+import { userRepository } from '../repositories/userRepository';
+import { forbidden, notFound } from '../utils/errors';
+import { notificationService } from './notificationService';
+
+const WEIGHTS = { urgency: 0.4, proximity: 0.35, capacity: 0.25 }; // engineering
+// parameters (documented in docs/MATCHING_ALGORITHM.md) — NOT tuned optima.
+
+async function buildMatcherRequest(
+  db: Queryable,
+  donations: DonationRow[],
+  strategy: 'greedy' | 'hungarian',
+): Promise<MatcherRequest> {
+  const recipients = await userRepository.listActiveRecipients(db);
+
+  // Capacity already committed to PENDING match offers must count against
+  // recipients, otherwise later cycles would double-book the same capacity.
+  const pendingR = await db.query<{ recipient_id: string; pending: string }>(
+    `SELECT m.recipient_id, SUM(d.quantity_servings)::text AS pending
+       FROM matches m JOIN donations d ON d.donation_id = m.donation_id
+      WHERE m.status = 'PENDING'
+      GROUP BY m.recipient_id`,
+  );
+  const pendingByRecipient = new Map(pendingR.rows.map((r) => [r.recipient_id, Number(r.pending)]));
+
+  // PostGIS spatial candidate retrieval (spec §9): ST_DWithin prefilters at
+  // max radius, ST_Distance gives exact km for every donation-recipient pair.
+  const pairDistances: MatcherRequest['pairDistances'] = [];
+  if (donations.length && recipients.length) {
+    const r = await db.query<{ donation_id: string; recipient_id: string; distance_km: number }>(
+      `SELECT d.donation_id, r.recipient_id,
+              ST_Distance(d.pickup_location, r.location) / 1000.0 AS distance_km
+         FROM donations d CROSS JOIN recipient_organizations r
+        WHERE d.donation_id = ANY($1)
+          AND r.active = TRUE AND r.location IS NOT NULL
+          AND ST_DWithin(d.pickup_location, r.location, $2 * 1000.0)`,
+      [donations.map((d) => d.donation_id), config.matching.maxRadiusKm],
+    );
+    pairDistances.push(
+      ...r.rows.map((x) => ({
+        donationId: x.donation_id,
+        recipientId: x.recipient_id,
+        distanceKm: Number(x.distance_km),
+      })),
+    );
+  }
+
+  const exclusions: MatcherRequest['exclusions'] = [];
+  for (const d of donations) {
+    for (const recipientId of await matchRepository.rejectedRecipientIds(db, d.donation_id)) {
+      exclusions.push({ donationId: d.donation_id, recipientId });
+    }
+  }
+
+  return {
+    donations: donations.map((d) => ({
+      donationId: d.donation_id,
+      foodType: d.food_type,
+      quantityServings: d.quantity_servings,
+      latitude: d.latitude,
+      longitude: d.longitude,
+      postedAt: d.posted_at,
+      expiresAt: d.expires_at,
+      pickupStart: d.pickup_start,
+      pickupEnd: d.pickup_end,
+    })),
+    recipients: recipients.map((r) => ({
+      recipientId: r.recipient_id,
+      name: r.name ?? r.recipient_id,
+      latitude: r.latitude!,
+      longitude: r.longitude!,
+      servingCapacity: r.serving_capacity,
+      assignedServings: r.assigned_servings + (pendingByRecipient.get(r.recipient_id) ?? 0),
+      serviceRadiusKm: r.service_radius_km,
+      foodPreferences: r.food_preferences,
+      dietaryRestrictions: r.dietary_restrictions,
+      active: r.active,
+    })),
+    exclusions,
+    pairDistances,
+    config: {
+      strategy,
+      weights: WEIGHTS,
+      initialRadiusKm: config.matching.initialRadiusKm,
+      maxRadiusKm: config.matching.maxRadiusKm,
+      radiusStepKm: config.matching.radiusStepKm,
+      urgencyHorizonMinutes: 360,
+      minPickupFeasibilityMinutes: 30,
+    },
+    now: new Date().toISOString(),
+  };
+}
+
+/** Persist matcher output atomically: Match rows, donation transitions,
+ *  waitlist entries and notifications all commit or roll back together. */
+async function persistResult(
+  db: Queryable,
+  result: MatcherResponse,
+  donationsById: Map<string, DonationRow>,
+): Promise<void> {
+  await withTransaction(db, async (tx) => {
+    for (const a of result.assignments) {
+      const donation = donationsById.get(a.donationId);
+      if (!donation || donation.status !== 'POSTED') continue; // raced; skip
+
+      await matchRepository.create(tx, {
+        donationId: a.donationId,
+        recipientId: a.recipientId,
+        score: a.totalScore,
+        distanceKm: a.distanceKm,
+        urgencyScore: a.urgencyScore,
+        proximityScore: a.proximityScore,
+        capacityScore: a.capacityScore,
+        searchRadiusKm: a.searchRadiusKmUsed,
+        offerExpiryMinutes: config.matching.offerExpiryMinutes,
+      });
+      assertDonationTransition('POSTED', 'MATCHED');
+      await donationRepository.updateStatus(tx, a.donationId, 'MATCHED', { matchedAt: true });
+      await waitlistRepository.remove(tx, a.donationId);
+
+      await notificationService.notify(
+        tx, a.recipientId, 'MATCH_CREATED',
+        `New match offer: ${donation.quantity_servings} servings of ${donation.food_type}, ` +
+          `${a.distanceKm.toFixed(1)} km away (score ${a.totalScore.toFixed(2)}). Please accept or reject.`,
+      );
+      await notificationService.notify(
+        tx, donation.donor_id, 'MATCH_CREATED',
+        `A recipient was found for your ${donation.food_type} donation — awaiting their confirmation.`,
+      );
+    }
+
+    for (const w of result.waitlisted) {
+      const donation = donationsById.get(w.donationId);
+      if (!donation || donation.status !== 'POSTED') continue;
+      // Donation REMAINS POSTED (never silently dropped, spec §11) and is
+      // tracked on the waitlist for the next cycle.
+      await waitlistRepository.upsert(tx, w.donationId, w.reason, w.maxRadiusKmTried);
+      await notificationService.notify(
+        tx, donation.donor_id, 'DONOR_AWAITING_MATCH',
+        `No eligible recipient found within ${w.maxRadiusKmTried.toFixed(0)} km yet. ` +
+          'Your donation stays posted and will be retried in the next matching cycle.',
+      );
+    }
+  });
+}
+
+export const matchingService = {
+  /**
+   * Run one greedy/hungarian matching cycle over all active POSTED donations
+   * (spec §9): expire stale donations/offers first, then match most-urgent
+   * first (greedy) or globally optimally (hungarian).
+   */
+  async runCycle(db: Queryable, strategyOverride?: 'greedy' | 'hungarian') {
+    const expiredDonations = await donationRepository.expireStalePosted(db);
+    const expiredMatches = await matchRepository.expireStalePending(db);
+    for (const m of expiredMatches) {
+      // Match offer timed out -> requeue the donation for this very cycle.
+      await donationRepository.updateStatus(db, m.donation_id, 'POSTED');
+      await notificationService.notify(db, m.recipient_id, 'MATCH_EXPIRED', 'A match offer expired before a response.');
+    }
+
+    const donations = await donationRepository.listMatchablePosted(db);
+    if (!donations.length) {
+      return { strategy: strategyOverride ?? config.matching.strategy, assignments: [], waitlisted: [], explanations: [], expiredDonations, expiredMatches };
+    }
+
+    const strategy = strategyOverride ?? config.matching.strategy;
+    const request = await buildMatcherRequest(db, donations, strategy);
+    const result = await runMatchingCycle(request);
+    await persistResult(db, result, new Map(donations.map((d) => [d.donation_id, d])));
+
+    return { ...result, expiredDonations, expiredMatches };
+  },
+
+  /** Recipient accepts a PENDING match offer (spec §12): Match -> ACCEPTED,
+   *  Pickup created (SCHEDULED). Donation stays MATCHED. */
+  async acceptMatch(db: Queryable, matchId: string, recipientUserId: string) {
+    return withTransaction(db, async (tx) => {
+      const match = await matchRepository.findByIdForUpdate(tx, matchId);
+      if (!match) throw notFound(`Match '${matchId}' not found.`);
+      if (match.recipient_id !== recipientUserId) throw forbidden('This match belongs to another recipient.');
+      assertInStatus('match', match.status, ['PENDING'], 'accept');
+
+      const donation = await donationRepository.findByIdForUpdate(tx, match.donation_id);
+      if (!donation) throw notFound('Donation for this match no longer exists.');
+      assertInStatus('donation', donation.status, ['MATCHED'], 'accept match for');
+
+      assertMatchTransition(match.status, 'ACCEPTED');
+      await matchRepository.setStatus(tx, matchId, 'ACCEPTED', true);
+      await userRepository.adjustAssignedServings(tx, match.recipient_id, donation.quantity_servings);
+
+      const scheduledAt = donation.pickup_start ? new Date(donation.pickup_start) : new Date(Date.now() + 3_600_000);
+      const donor = await userRepository.findById(tx, donation.donor_id);
+      const recipient = await userRepository.findById(tx, match.recipient_id);
+      const pickup = await pickupRepository.create(tx, {
+        matchId,
+        scheduledAt,
+        contactDetails:
+          `Donor: ${donor?.name ?? ''} (${donor?.phone ?? 'no phone'}) | ` +
+          `Recipient: ${recipient?.name ?? ''} (${recipient?.phone ?? 'no phone'})` +
+          (donation.pickup_address ? ` | Address: ${donation.pickup_address}` : ''),
+      });
+
+      await notificationService.notify(tx, donation.donor_id, 'MATCH_ACCEPTED', `${recipient?.name} accepted your donation match.`);
+      await notificationService.notify(tx, donation.donor_id, 'PICKUP_SCHEDULED', `Pickup scheduled at ${scheduledAt.toISOString()}.`);
+      await notificationService.notify(tx, match.recipient_id, 'PICKUP_SCHEDULED', `Pickup scheduled at ${scheduledAt.toISOString()}.`);
+
+      return { match: await matchRepository.findById(tx, matchId), pickup };
+    });
+  },
+
+  /** Recipient rejects a PENDING match (spec §12): Match -> REJECTED, the
+   *  recipient is excluded from this donation's immediate retry, the donation
+   *  returns to POSTED and a fresh single-donation matching cycle runs. */
+  async rejectMatch(db: Queryable, matchId: string, recipientUserId: string, body: unknown) {
+    const reason = (body as { reason?: string } | undefined)?.reason;
+
+    const { donationId } = await withTransaction(db, async (tx) => {
+      const match = await matchRepository.findByIdForUpdate(tx, matchId);
+      if (!match) throw notFound(`Match '${matchId}' not found.`);
+      if (match.recipient_id !== recipientUserId) throw forbidden('This match belongs to another recipient.');
+      assertInStatus('match', match.status, ['PENDING'], 'reject');
+
+      assertMatchTransition(match.status, 'REJECTED');
+      await matchRepository.setStatus(tx, matchId, 'REJECTED', true);
+
+      const donation = await donationRepository.findByIdForUpdate(tx, match.donation_id);
+      if (!donation) throw notFound('Donation for this match no longer exists.');
+      assertDonationTransition(donation.status, 'POSTED'); // MATCHED -> POSTED requeue
+      await donationRepository.updateStatus(tx, match.donation_id, 'POSTED');
+
+      await notificationService.notify(
+        tx, donation.donor_id, 'MATCH_REJECTED',
+        `A recipient declined the match${reason ? ` (${reason})` : ''}. Re-matching your donation now.`,
+      );
+      return { donationId: match.donation_id };
+    });
+
+    // Requeue matching for this donation (rejected recipient now excluded).
+    const cycle = await this.runCycle(db);
+    const newMatch = (await matchRepository.listByDonation(db, donationId)).find((m) => m.status === 'PENDING') ?? null;
+    return { donationId, rematched: newMatch !== null, newMatch, cycle };
+  },
+
+  /** Match offers that expired without a response (spec §12): Match -> EXPIRED,
+   *  donation requeues to POSTED. Swept at the start of every cycle. */
+  async expireStale(db: Queryable) {
+    const expired = await matchRepository.expireStalePending(db);
+    for (const m of expired) {
+      await donationRepository.updateStatus(db, m.donation_id, 'POSTED');
+    }
+    return expired;
+  },
+
+  async inbox(db: Queryable, recipientUserId: string) {
+    return matchRepository.listByRecipient(db, recipientUserId);
+  },
+
+  async getMatch(db: Queryable, matchId: string) {
+    const match = await matchRepository.findById(db, matchId);
+    if (!match) throw notFound(`Match '${matchId}' not found.`);
+    return match;
+  },
+
+  async waitlist(db: Queryable) {
+    return waitlistRepository.list(db);
+  },
+};

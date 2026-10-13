@@ -113,6 +113,46 @@ export const impactService = {
        LIMIT 5`,
     );
 
+    // Rescue rate (FR-45, proposal outcome metric): of posted donations whose
+    // outcome is settled (COMPLETED or EXPIRED), the share completed before
+    // their deadline. Donations still in progress, and ones the donor
+    // cancelled, are not counted either way.
+    const rescue = await db.query<{ rescued: string; resolved: string }>(
+      `SELECT COUNT(*) FILTER (WHERE d.status = 'COMPLETED' AND p.completed_at <= d.expires_at)::text AS rescued,
+              COUNT(*) FILTER (WHERE d.status IN ('COMPLETED', 'EXPIRED'))::text AS resolved
+         FROM donations d
+         LEFT JOIN LATERAL (
+           SELECT MAX(pk.completed_at) AS completed_at
+             FROM pickups pk JOIN matches m ON m.match_id = pk.match_id
+            WHERE m.donation_id = d.donation_id
+         ) p ON TRUE
+        WHERE d.posted_at IS NOT NULL`,
+    );
+
+    // First-offer acceptance rate (FR-48): of each donation's first offer that
+    // has been answered or timed out, the share accepted. A low rate means the
+    // scoring ranks poorly.
+    const firstOffers = await db.query<{ accepted: string; decided: string }>(
+      `WITH first AS (
+         SELECT DISTINCT ON (donation_id) status
+           FROM matches ORDER BY donation_id, created_at, match_id)
+       SELECT COUNT(*) FILTER (WHERE status = 'ACCEPTED')::text AS accepted,
+              COUNT(*) FILTER (WHERE status IN ('ACCEPTED', 'REJECTED', 'EXPIRED'))::text AS decided
+         FROM first`,
+    );
+
+    // Mean donor-to-recipient distance per allocation strategy (FR-48).
+    const distance = await db.query<{ strategy: string; mean_km: number; offers: string }>(
+      `SELECT strategy, AVG(distance_km) AS mean_km, COUNT(*)::text AS offers
+         FROM matches WHERE strategy IS NOT NULL AND distance_km IS NOT NULL
+        GROUP BY strategy`,
+    );
+    const distanceFor = (s: string) => {
+      const row = distance.rows.find((x) => x.strategy === s);
+      return row ? { meanKm: Math.round(Number(row.mean_km) * 100) / 100, offers: Number(row.offers) } : { meanKm: null, offers: 0 };
+    };
+    const ratio = (num: number, den: number) => (den === 0 ? null : Math.round((num / den) * 1000) / 1000);
+
     const ratings = await ratingRepository.summary(db);
     const clarityFor = (role: string) => {
       const row = ratings.find((x) => x.role === role);
@@ -138,6 +178,17 @@ export const impactService = {
       waitlistedCount: Number(waitlisted.rows[0]!.count),
       expiredCount: Number(expired.rows[0]!.count),
       statusClarity: { donor: clarityFor('DONOR'), recipient: clarityFor('RECIPIENT') },
+      rescueRate: {
+        rate: ratio(Number(rescue.rows[0]!.rescued), Number(rescue.rows[0]!.resolved)),
+        rescued: Number(rescue.rows[0]!.rescued),
+        resolved: Number(rescue.rows[0]!.resolved),
+      },
+      firstOfferAcceptance: {
+        rate: ratio(Number(firstOffers.rows[0]!.accepted), Number(firstOffers.rows[0]!.decided)),
+        accepted: Number(firstOffers.rows[0]!.accepted),
+        decided: Number(firstOffers.rows[0]!.decided),
+      },
+      meanDistanceKmByStrategy: { greedy: distanceFor('greedy'), hungarian: distanceFor('hungarian') },
       topDonors: topDonors.rows.map((r) => ({
         donorId: r.donor_id, name: r.name, meals: Number(r.meals), donations: Number(r.donations),
       })),

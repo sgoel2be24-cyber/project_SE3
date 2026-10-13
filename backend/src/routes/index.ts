@@ -50,6 +50,7 @@ export function buildRouter(db: Queryable): Router {
   // ---- /api/admin (donation review + operations)
   r.get('/admin/donations/pending', authenticate, requireRole('ADMIN'), wrap(admin.pending));
   r.get('/admin/donations/:id', authenticate, requireRole('ADMIN'), wrap(admin.reviewDetail));
+  r.get('/admin/donations/:id/explanations', authenticate, requireRole('ADMIN'), wrap(admin.explanations));
   r.patch('/admin/donations/:id/review', authenticate, requireRole('ADMIN'), wrap(admin.review));
   r.post('/admin/matching/run', authenticate, requireRole('ADMIN'), wrap(admin.runMatching));
   r.get('/admin/waitlist', authenticate, requireRole('ADMIN'), wrap(admin.waitlist));

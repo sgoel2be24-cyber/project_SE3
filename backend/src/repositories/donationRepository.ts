@@ -107,12 +107,4 @@ export const donationRepository = {
     return r.rows;
   },
 
-  async expireStalePosted(db: Queryable): Promise<string[]> {
-    const r = await db.query<{ donation_id: string }>(
-      `UPDATE donations SET status = 'EXPIRED', updated_at = now()
-       WHERE status = 'POSTED' AND expires_at <= now()
-       RETURNING donation_id`,
-    );
-    return r.rows.map((x) => x.donation_id);
-  },
 };

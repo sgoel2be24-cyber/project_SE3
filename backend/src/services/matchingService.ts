@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { setActor } from '../db/actor';
 import { withTransaction, type Queryable } from '../db/pool';
 import { assertDonationTransition, assertInStatus, assertMatchTransition } from '../domain/stateMachines';
 import {
@@ -12,6 +13,7 @@ import { pickupRepository } from '../repositories/pickupRepository';
 import { waitlistRepository } from '../repositories/miscRepository';
 import { userRepository } from '../repositories/userRepository';
 import { ApiError, conflict, forbidden, notFound } from '../utils/errors';
+import { expiryService } from './expiryService';
 import { notificationService } from './notificationService';
 
 /** SRS FR-36: an offer past its response window cannot be answered, even if
@@ -113,8 +115,26 @@ async function persistResult(
   db: Queryable,
   result: MatcherResponse,
   donationsById: Map<string, DonationRow>,
-): Promise<void> {
-  await withTransaction(db, async (tx) => {
+  strategy: 'greedy' | 'hungarian',
+  actorId: string | null,
+): Promise<string> {
+  return withTransaction(db, async (tx) => {
+    // SRS NFR-17: keep the matcher's per-candidate reasons for every donation
+    // this run considered, so any allocation can be explained afterwards.
+    const run = await tx.query<{ run_id: string }>(
+      'INSERT INTO matching_runs (strategy, triggered_by) VALUES ($1, $2) RETURNING run_id',
+      [strategy, actorId],
+    );
+    const runId = run.rows[0]!.run_id;
+    for (const e of result.explanations) {
+      if (!donationsById.has(e.donationId)) continue;
+      await tx.query(
+        `INSERT INTO match_explanations (run_id, donation_id, outcome, candidates)
+         VALUES ($1, $2, $3, $4::jsonb)`,
+        [runId, e.donationId, e.outcome, JSON.stringify(e.candidates)],
+      );
+    }
+
     for (const a of result.assignments) {
       const donation = donationsById.get(a.donationId);
       if (!donation || donation.status !== 'POSTED') continue; // raced; skip
@@ -129,6 +149,8 @@ async function persistResult(
         capacityScore: a.capacityScore,
         searchRadiusKm: a.searchRadiusKmUsed,
         offerExpiryMinutes: config.matching.offerExpiryMinutes,
+        strategy,
+        runId,
       });
       assertDonationTransition('POSTED', 'MATCHED');
       await donationRepository.updateStatus(tx, a.donationId, 'MATCHED', { matchedAt: true });
@@ -157,6 +179,7 @@ async function persistResult(
           'Your donation stays posted and will be retried in the next matching cycle.',
       );
     }
+    return runId;
   });
 }
 
@@ -166,30 +189,28 @@ export const matchingService = {
    * (spec §9): expire stale donations/offers first, then match most-urgent
    * first (greedy) or globally optimally (hungarian).
    */
-  async runCycle(db: Queryable, strategyOverride?: 'greedy' | 'hungarian') {
+  async runCycle(db: Queryable, strategyOverride?: 'greedy' | 'hungarian', actorId: string | null = null) {
     // The whole cycle — expiry sweep, matcher call, persistence — is one
     // transaction. If the matching service is unreachable it throws 502 and
     // everything rolls back, so no donation state changes (SRS FR-31).
     return withTransaction(db, async (tx) => {
-      const expiredDonations = await donationRepository.expireStalePosted(tx);
-      const expiredMatches = await matchRepository.expireStalePending(tx);
-      for (const m of expiredMatches) {
-        // Match offer timed out -> requeue the donation for this very cycle.
-        await donationRepository.updateStatus(tx, m.donation_id, 'POSTED');
-        await notificationService.notify(tx, m.recipient_id, 'MATCH_EXPIRED', 'A match offer expired before a response.');
-      }
+      // Expiry first, as the system (offers that timed out requeue their
+      // donation for this very cycle), then matching as the caller.
+      await setActor(tx, null);
+      const { expiredDonations, expiredMatches, cancelledPickups } = await expiryService.sweepWithin(tx);
+      await setActor(tx, actorId);
 
       const strategy = strategyOverride ?? config.matching.strategy;
       const donations = await donationRepository.listMatchablePosted(tx);
       if (!donations.length) {
-        return { strategy, assignments: [], waitlisted: [], explanations: [], expiredDonations, expiredMatches };
+        return { strategy, runId: null, assignments: [], waitlisted: [], explanations: [], expiredDonations, expiredMatches, cancelledPickups };
       }
 
       const request = await buildMatcherRequest(tx, donations, strategy);
       const result = await runMatchingCycle(request);
-      await persistResult(tx, result, new Map(donations.map((d) => [d.donation_id, d])));
+      const runId = await persistResult(tx, result, new Map(donations.map((d) => [d.donation_id, d])), strategy, actorId);
 
-      return { ...result, expiredDonations, expiredMatches };
+      return { ...result, runId, expiredDonations, expiredMatches, cancelledPickups };
     });
   },
 
@@ -197,6 +218,7 @@ export const matchingService = {
    *  Pickup created (SCHEDULED). Donation stays MATCHED. */
   async acceptMatch(db: Queryable, matchId: string, recipientUserId: string) {
     return withTransaction(db, async (tx) => {
+      await setActor(tx, recipientUserId);
       const match = await matchRepository.findByIdForUpdate(tx, matchId);
       if (!match) throw notFound(`Match '${matchId}' not found.`);
       if (match.recipient_id !== recipientUserId) throw forbidden('This match belongs to another recipient.');
@@ -238,6 +260,7 @@ export const matchingService = {
     const reason = (body as { reason?: string } | undefined)?.reason;
 
     const { donationId } = await withTransaction(db, async (tx) => {
+      await setActor(tx, recipientUserId);
       const match = await matchRepository.findByIdForUpdate(tx, matchId);
       if (!match) throw notFound(`Match '${matchId}' not found.`);
       if (match.recipient_id !== recipientUserId) throw forbidden('This match belongs to another recipient.');
@@ -272,16 +295,6 @@ export const matchingService = {
     }
     const newMatch = (await matchRepository.listByDonation(db, donationId)).find((m) => m.status === 'PENDING') ?? null;
     return { donationId, rematched: newMatch !== null, newMatch, cycle, matcherError };
-  },
-
-  /** Match offers that expired without a response (spec §12): Match -> EXPIRED,
-   *  donation requeues to POSTED. Swept at the start of every cycle. */
-  async expireStale(db: Queryable) {
-    const expired = await matchRepository.expireStalePending(db);
-    for (const m of expired) {
-      await donationRepository.updateStatus(db, m.donation_id, 'POSTED');
-    }
-    return expired;
   },
 
   async inbox(db: Queryable, recipientUserId: string) {

@@ -1,3 +1,4 @@
+import { setActor } from '../db/actor';
 import { withTransaction, type Queryable } from '../db/pool';
 import { assertDonationTransition, assertInStatus, assertPickupTransition } from '../domain/stateMachines';
 import { donationRepository } from '../repositories/donationRepository';
@@ -52,6 +53,7 @@ export const pickupService = {
 
   async markPickedUp(db: Queryable, pickupId: string, actor: { userId: string; role: string }) {
     return withTransaction(db, async (tx) => {
+      await setActor(tx, actor.userId);
       const pickup = await pickupRepository.findByIdForUpdate(tx, pickupId);
       if (!pickup) throw notFound(`Pickup '${pickupId}' not found.`);
       const match = await matchRepository.findByIdForUpdate(tx, pickup.match_id);
@@ -76,6 +78,7 @@ export const pickupService = {
 
   async markCompleted(db: Queryable, pickupId: string, actor: { userId: string; role: string }) {
     return withTransaction(db, async (tx) => {
+      await setActor(tx, actor.userId);
       const pickup = await pickupRepository.findByIdForUpdate(tx, pickupId);
       if (!pickup) throw notFound(`Pickup '${pickupId}' not found.`);
       const match = await matchRepository.findByIdForUpdate(tx, pickup.match_id);

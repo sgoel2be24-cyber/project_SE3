@@ -24,6 +24,11 @@ describe('donation state machine (canonical, no ACCEPTED)', () => {
   it('allows review rejection and requeue', () => {
     expect(canTransitionDonation('PENDING_REVIEW', 'REJECTED')).toBe(true);
     expect(canTransitionDonation('MATCHED', 'POSTED')).toBe(true); // rematch requeue
+    // NFR-9: a donation past its deadline before collection expires from any open state
+    expect(canTransitionDonation('PENDING_REVIEW', 'EXPIRED')).toBe(true);
+    expect(canTransitionDonation('POSTED', 'EXPIRED')).toBe(true);
+    expect(canTransitionDonation('MATCHED', 'EXPIRED')).toBe(true);
+    expect(canTransitionDonation('PICKED_UP', 'EXPIRED')).toBe(false); // collected food never expires
   });
 
   it.each([

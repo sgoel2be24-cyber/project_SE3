@@ -62,5 +62,8 @@ export const NOTIFICATION_TYPES = [
   'PICKUP_PICKED_UP',
   'REDISTRIBUTION_COMPLETED',
   'MATCH_EXPIRED',
+  'DONATION_CANCELLED',
+  'DONATION_EXPIRED',
+  'PICKUP_CANCELLED',
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];

@@ -16,6 +16,9 @@ export const config = {
   matcherUrl: process.env.MATCHER_URL ?? 'http://localhost:8000',
   matcherTimeoutMs: Number(process.env.MATCHER_TIMEOUT_MS ?? 20_000),
 
+  /** SRS FR-52: seconds between scheduled expiry sweeps; 0 disables. */
+  sweepIntervalSeconds: Number(process.env.SWEEP_INTERVAL_SECONDS ?? 60),
+
   matching: {
     /** 'greedy' (default, mid-semester demo) or 'hungarian'. */
     strategy: (process.env.MATCHING_STRATEGY ?? 'greedy') as 'greedy' | 'hungarian',

@@ -45,11 +45,13 @@ export function adminController(db: Queryable) {
       res.json({ donations: await reviewService.listPending(db) }),
     reviewDetail: async (req: Request, res: Response) =>
       res.json(await reviewService.getForReview(db, req.params.id!)),
+    explanations: async (req: Request, res: Response) =>
+      res.json(await reviewService.explanations(db, req.params.id!)),
     review: async (req: Request, res: Response) =>
       res.json(await reviewService.review(db, req.user.userId, req.params.id!, req.body)),
     runMatching: async (req: Request, res: Response) => {
       const strategy = (req.body as { strategy?: 'greedy' | 'hungarian' } | undefined)?.strategy;
-      res.json(await matchingService.runCycle(db, strategy));
+      res.json(await matchingService.runCycle(db, strategy, req.user.userId));
     },
     waitlist: async (_req: Request, res: Response) =>
       res.json({ waitlist: await matchingService.waitlist(db) }),

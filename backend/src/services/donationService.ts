@@ -1,10 +1,13 @@
-import type { Queryable } from '../db/pool';
+import { setActor } from '../db/actor';
+import { withTransaction, type Queryable } from '../db/pool';
 import { assertDonationTransition, assertInStatus } from '../domain/stateMachines';
 import { donationRepository, type DonationRow } from '../repositories/donationRepository';
 import { matchRepository } from '../repositories/matchRepository';
 import { pickupRepository } from '../repositories/pickupRepository';
+import { auditRepository } from '../repositories/auditRepository';
 import { ratingRepository } from '../repositories/ratingRepository';
 import { reviewRepository } from '../repositories/reviewRepository';
+import { waitlistRepository } from '../repositories/miscRepository';
 import { userRepository } from '../repositories/userRepository';
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors';
 import {
@@ -59,22 +62,25 @@ export const donationService = {
 
     const location = await geocodingService.resolve(db, { latitude, longitude, address: pickupAddress });
 
-    const donation = await donationRepository.create(db, {
-      donorId, foodType, description, quantityServings, pickupAddress,
-      latitude: location.latitude, longitude: location.longitude,
-      pickupStart, pickupEnd, expiresAt,
+    return withTransaction(db, async (tx) => {
+      await setActor(tx, donorId);
+      const donation = await donationRepository.create(tx, {
+        donorId, foodType, description, quantityServings, pickupAddress,
+        latitude: location.latitude, longitude: location.longitude,
+        pickupStart, pickupEnd, expiresAt,
+      });
+
+      // Notify admins that a review is required (spec §14).
+      const admins = await userRepository.listAdmins(tx);
+      await notificationService.notifyMany(
+        tx,
+        admins.map((a) => a.user_id),
+        'ADMIN_REVIEW_REQUIRED',
+        `New donation ${donation.donation_id.slice(0, 8)}… (${quantityServings} servings of ${foodType}) awaits review.`,
+      );
+
+      return { donation, locationSource: location.source };
     });
-
-    // Notify admins that a review is required (spec §14).
-    const admins = await userRepository.listAdmins(db);
-    await notificationService.notifyMany(
-      db,
-      admins.map((a) => a.user_id),
-      'ADMIN_REVIEW_REQUIRED',
-      `New donation ${donation.donation_id.slice(0, 8)}… (${quantityServings} servings of ${foodType}) awaits review.`,
-    );
-
-    return { donation, locationSource: location.source };
   },
 
   async listMine(db: Queryable, donorId: string) {
@@ -89,14 +95,16 @@ export const donationService = {
     if (requester.role === 'DONOR' && donation.donor_id !== requester.userId) {
       throw forbidden('Donors can only view their own donations.');
     }
-    const [reviews, allMatches, allPickups] = await Promise.all([
+    const [reviews, allMatches, allPickups, allEvents] = await Promise.all([
       reviewRepository.listByDonation(db, donationId),
       matchRepository.listByDonation(db, donationId),
       pickupRepository.listForDonation(db, donationId),
+      auditRepository.eventsForDonation(db, donationId),
     ]);
 
+    // `events`: every status change with its time and actor (NFR-19).
     if (requester.role !== 'RECIPIENT') {
-      return { donation, reviews, matches: allMatches, pickups: allPickups };
+      return { donation, reviews, matches: allMatches, pickups: allPickups, events: allEvents };
     }
 
     // A recipient may only open a donation that was offered to them, and sees
@@ -105,7 +113,8 @@ export const donationService = {
     const matches = allMatches.filter((m) => m.recipient_id === requester.userId);
     if (!matches.length) throw forbidden('This donation was not offered to your organisation.');
     const pickups = allPickups.filter((p) => p.recipient_id === requester.userId);
-    return { donation, reviews, matches, pickups };
+    const events = allEvents.filter((e) => e.entity_type === 'DONATION' || e.recipient_id === requester.userId);
+    return { donation, reviews, matches, pickups, events };
   },
 
   /**
@@ -143,14 +152,28 @@ export const donationService = {
     });
   },
 
-  /** Donor cancels an eligible donation (pre-pickup). */
+  /** Donor cancels an eligible donation (pre-pickup, BR-2). The donor gets a
+   *  confirmation and, if it was still awaiting review, the administrators are
+   *  told it left their queue (FR-42). */
   async cancelDonation(db: Queryable, donationId: string, donorId: string) {
-    const donation = await donationRepository.findById(db, donationId);
-    if (!donation) throw notFound(`Donation '${donationId}' not found.`);
-    if (donation.donor_id !== donorId) throw forbidden('Only the owning donor can cancel this donation.');
-    assertInStatus('donation', donation.status, ['PENDING_REVIEW', 'POSTED'], 'cancel');
-    assertDonationTransition(donation.status, 'CANCELLED');
-    await donationRepository.updateStatus(db, donationId, 'CANCELLED');
-    return donationRepository.findById(db, donationId);
+    return withTransaction(db, async (tx) => {
+      await setActor(tx, donorId);
+      const donation = await donationRepository.findByIdForUpdate(tx, donationId);
+      if (!donation) throw notFound(`Donation '${donationId}' not found.`);
+      if (donation.donor_id !== donorId) throw forbidden('Only the owning donor can cancel this donation.');
+      assertInStatus('donation', donation.status, ['PENDING_REVIEW', 'POSTED'], 'cancel');
+      assertDonationTransition(donation.status, 'CANCELLED');
+      await donationRepository.updateStatus(tx, donationId, 'CANCELLED');
+      await waitlistRepository.remove(tx, donationId);
+
+      const what = `${donation.quantity_servings} servings of ${donation.food_type}`;
+      await notificationService.notify(tx, donorId, 'DONATION_CANCELLED', `You cancelled your donation of ${what}.`);
+      if (donation.status === 'PENDING_REVIEW') {
+        const admins = await userRepository.listAdmins(tx);
+        await notificationService.notifyMany(tx, admins.map((a) => a.user_id), 'DONATION_CANCELLED',
+          `Donation ${donationId.slice(0, 8)}… (${what}) was cancelled by the donor and left the review queue.`);
+      }
+      return donationRepository.findById(tx, donationId);
+    });
   },
 };

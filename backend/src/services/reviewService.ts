@@ -1,3 +1,5 @@
+import { auditRepository } from '../repositories/auditRepository';
+import { setActor } from '../db/actor';
 import { withTransaction, type Queryable } from '../db/pool';
 import { donationRepository } from '../repositories/donationRepository';
 import { reviewRepository } from '../repositories/reviewRepository';
@@ -21,6 +23,15 @@ export const reviewService = {
     return { donation, reviews };
   },
 
+  /** SRS NFR-17: the matcher's stored reasons for every run that considered
+   *  this donation — which organisations were eligible, their scores, and why
+   *  the others were excluded. Newest run first. */
+  async explanations(db: Queryable, donationId: string) {
+    const donation = await donationRepository.findById(db, donationId);
+    if (!donation) throw notFound(`Donation '${donationId}' not found.`);
+    return { donationId, runs: await auditRepository.explanationsForDonation(db, donationId) };
+  },
+
   /**
    * Approve/reject a PENDING_REVIEW donation.
    * Row lock (SELECT ... FOR UPDATE) + transaction guarantee the same donation
@@ -32,6 +43,7 @@ export const reviewService = {
     const remarks = optionalString(b, 'remarks', 1000);
 
     return withTransaction(db, async (tx) => {
+      await setActor(tx, adminId);
       const donation = await donationRepository.findByIdForUpdate(tx, donationId);
       if (!donation) throw notFound(`Donation '${donationId}' not found.`);
       if (donation.status !== 'PENDING_REVIEW') {

@@ -70,9 +70,33 @@ jobs:
       - name: Tests
         working-directory: backend
         run: npm test
-      - name: Matcher log (on failure)
+
+      # SRS NFR-22: the API contract the React client depends on is checked
+      # end to end against a running server; any breach fails the build.
+      - name: Prepare demo database
+        env:
+          PGPASSWORD: foodbridge
+        run: |
+          psql -h localhost -U foodbridge -d foodbridge_test -c "CREATE DATABASE foodbridge;"
+          psql -h localhost -U foodbridge -d foodbridge -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+      - name: Migrate, seed and start the API
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://foodbridge:foodbridge@localhost:5432/foodbridge
+          GEOCODING_PROVIDER: "off"
+        run: |
+          npm run migrate
+          npm run seed
+          nohup npx tsx src/server.ts > /tmp/api.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:3000/api/health && break; sleep 1; done
+      - name: API contract check
+        run: node frontend/test/contract-check.mjs http://localhost:3000
+
+      - name: Service logs (on failure)
         if: failure()
-        run: cat /tmp/matcher.log
+        run: |
+          echo "--- matcher"; cat /tmp/matcher.log || true
+          echo "--- api"; cat /tmp/api.log || true
 
   frontend:
     name: Frontend (React)

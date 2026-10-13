@@ -10,15 +10,17 @@ import type { DonationStatus, MatchStatus, PickupStatus } from './enums';
  *
  *   PENDING_REVIEW --admin approval--> POSTED --match found--> MATCHED
  *   MATCHED --pickup--> PICKED_UP --completion--> COMPLETED
- *   Side states: REJECTED (admin), CANCELLED (donor, pre-pickup), EXPIRED.
+ *   Side states: REJECTED (admin), CANCELLED (donor, pre-pickup), EXPIRED
+ *   (deadline passed before collection — from PENDING_REVIEW, POSTED or
+ *   MATCHED; SRS NFR-9).
  *   MATCHED --> POSTED is the requeue path when the recipient rejects a match
  *   or the match offer expires (the Match row keeps the audit trail).
  */
 
 const DONATION_TRANSITIONS: Readonly<Record<DonationStatus, readonly DonationStatus[]>> = {
-  PENDING_REVIEW: ['POSTED', 'REJECTED', 'CANCELLED'],
+  PENDING_REVIEW: ['POSTED', 'REJECTED', 'CANCELLED', 'EXPIRED'],
   POSTED: ['MATCHED', 'CANCELLED', 'EXPIRED'],
-  MATCHED: ['PICKED_UP', 'POSTED', 'CANCELLED'],
+  MATCHED: ['PICKED_UP', 'POSTED', 'CANCELLED', 'EXPIRED'],
   PICKED_UP: ['COMPLETED'],
   COMPLETED: [],
   REJECTED: [],

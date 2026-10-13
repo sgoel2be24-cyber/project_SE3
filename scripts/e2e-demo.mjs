@@ -64,8 +64,9 @@ const created = await call('POST', '/donations', {
     foodType: 'cooked_meals',
     description: 'E2E demo: lunch surplus',
     quantityServings: 22,
-    latitude: 12.9716,
-    longitude: 77.5946,
+    // Donor hub used by backend/src/db/seed.ts (Thapar Institute, Patiala).
+    latitude: 30.3548,
+    longitude: 76.3626,
     expiresInHours: 4,
   },
 });
@@ -86,7 +87,7 @@ check(approved.data.donation.status === 'POSTED', `status POSTED after approval 
 step('3. Admin rejection path (second donation)');
 const created2 = await call('POST', '/donations', {
   token: donor,
-  body: { foodType: 'cooked_meals', description: 'E2E reject demo', quantityServings: 5, latitude: 12.98, longitude: 77.6, expiresInHours: 3 },
+  body: { foodType: 'cooked_meals', description: 'E2E reject demo', quantityServings: 5, latitude: 30.3600, longitude: 76.3700, expiresInHours: 3 },
 });
 const rejected = await call('PATCH', `/admin/donations/${created2.data.donation.donation_id}/review`, {
   token: admin,
@@ -108,7 +109,7 @@ check(matchedDetail.data.donation.status === 'MATCHED', 'donation MATCHED');
 step('5. Zero-eligible fallback: far donation -> radius expansion -> waitlist');
 const farCreated = await call('POST', '/donations', {
   token: donor,
-  body: { foodType: 'cooked_meals', description: 'E2E far demo', quantityServings: 8, latitude: 13.55, longitude: 78.05, expiresInHours: 5 },
+  body: { foodType: 'cooked_meals', description: 'E2E far demo', quantityServings: 8, latitude: 31.2000, longitude: 77.2000, expiresInHours: 5 },
 });
 const farId = farCreated.data.donation.donation_id;
 await call('PATCH', `/admin/donations/${farId}/review`, { token: admin, body: { decision: 'APPROVED' } });
@@ -147,7 +148,7 @@ check(completed.data.pickup.status === 'COMPLETED', 'pickup COMPLETED');
 const afterComplete = await call('GET', `/donations/${donationId}`, { token: donor });
 check(afterComplete.data.donation.status === 'COMPLETED', 'donation COMPLETED');
 
-step('8. Impact metrics updated (TTM from real posted_at/matched_at)');
+step('8. Impact metrics updated (TTM: submission -> first accepted offer)');
 const impact = await call('GET', '/impact/summary', { token: admin });
 console.log(' ', JSON.stringify({
   mealsRedistributed: impact.data.mealsRedistributed,

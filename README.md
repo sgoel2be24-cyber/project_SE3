@@ -11,10 +11,10 @@ Hardik Pajiala · Shikhar Goel · Ayush Shukla. Instructor: Mrs. Anushka
 
 1. A donor posts surplus food: type, quantity, pickup address, expiry time.
 2. An admin reviews and approves the donation.
-3. The matching engine filters recipients by hard constraints (service radius, food type, capacity, verification). It then ranks the remaining recipients by urgency, proximity and capacity fit.
-4. The best recipient gets an offer and can accept or decline. A decline or a timeout triggers an automatic re-match. If nobody fits, the search radius widens and then the donation goes on a waitlist.
+3. The matching engine filters recipients by hard constraints (service radius, food type, dietary restrictions, capacity). It then ranks the remaining recipients by urgency, proximity and capacity fit.
+4. The best recipient gets an offer and can accept or decline. A decline or a timeout triggers an automatic re-match. If nobody fits, the search radius widens and then the donation goes on a waitlist. A background sweep expires overdue offers and donations every minute.
 5. The pickup is tracked through Scheduled → Picked up → Completed, and every step is timestamped.
-6. An impact dashboard reports meals saved, time-to-match, and expired or unmatched donations.
+6. An impact dashboard reports meals saved, time-to-match, rescue rate, first-offer acceptance, and expired or unmatched donations. Every status change is logged with who made it.
 
 ## Architecture
 

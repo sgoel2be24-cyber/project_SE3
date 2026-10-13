@@ -16,6 +16,8 @@ export interface MatchRow {
   expires_at: string | null;
   created_at: string;
   responded_at: string | null;
+  strategy?: 'greedy' | 'hungarian' | null;
+  run_id?: string | null;
 }
 
 export interface InboxRow extends MatchRow {
@@ -45,16 +47,18 @@ export const matchRepository = {
       donationId: string; recipientId: string; score: number; distanceKm: number;
       urgencyScore: number; proximityScore: number; capacityScore: number;
       searchRadiusKm?: number; offerExpiryMinutes: number;
+      strategy?: 'greedy' | 'hungarian'; runId?: string;
     },
   ): Promise<MatchRow> {
     const r = await db.query<MatchRow>(
       `INSERT INTO matches
          (donation_id, recipient_id, score, distance_km, urgency_score,
-          proximity_score, capacity_score, search_radius_km, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() + ($9 || ' minutes')::interval)
+          proximity_score, capacity_score, search_radius_km, expires_at, strategy, run_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() + ($9 || ' minutes')::interval, $10, $11)
        RETURNING *`,
       [m.donationId, m.recipientId, m.score, m.distanceKm, m.urgencyScore,
-       m.proximityScore, m.capacityScore, m.searchRadiusKm ?? null, String(m.offerExpiryMinutes)],
+       m.proximityScore, m.capacityScore, m.searchRadiusKm ?? null, String(m.offerExpiryMinutes),
+       m.strategy ?? null, m.runId ?? null],
     );
     return r.rows[0]!;
   },

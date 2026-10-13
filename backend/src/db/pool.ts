@@ -33,8 +33,12 @@ export async function withTransaction<T>(
   db: Queryable,
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
-  // If we were handed a Pool, grab a dedicated client; a PoolClient is
-  // already inside a transaction owned by the caller.
+  // A checked-out PoolClient is already inside a transaction owned by the
+  // caller, so join it. Detect it by release(): pg.Client also has connect(),
+  // so connect() alone cannot tell a Pool from a client.
+  if (typeof (db as pg.PoolClient).release === 'function') {
+    return fn(db as pg.PoolClient);
+  }
   if (typeof (db as pg.Pool).connect === 'function') {
     const client = await (db as pg.Pool).connect();
     try {

@@ -24,6 +24,15 @@ export const config = {
     radiusStepKm: Number(process.env.MATCH_RADIUS_STEP_KM ?? 5),
     /** A PENDING match offer expires after this many minutes. */
     offerExpiryMinutes: Number(process.env.MATCH_OFFER_EXPIRY_MINUTES ?? 30),
+    /**
+     * Score weights (SRS FR-23/FR-24): configuration, not embedded logic.
+     * Engineering parameters documented in docs/MATCHING_ALGORITHM.md — not tuned optima.
+     */
+    weights: {
+      urgency: Number(process.env.MATCH_WEIGHT_URGENCY ?? 0.4),
+      proximity: Number(process.env.MATCH_WEIGHT_PROXIMITY ?? 0.35),
+      capacity: Number(process.env.MATCH_WEIGHT_CAPACITY ?? 0.25),
+    },
   },
 
   geocoding: {
@@ -34,3 +43,8 @@ export const config = {
     minIntervalMs: 1100,
   },
 } as const;
+
+// SRS NFR-15: never run production on the development signing secret.
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET must be set when NODE_ENV=production (SRS NFR-15).');
+}

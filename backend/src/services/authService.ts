@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { getPool, withTransaction, type Queryable } from '../db/pool';
-import { DONOR_TYPES, ORGANIZATION_TYPES, USER_ROLES } from '../domain/enums';
+import { DONOR_TYPES, ORGANIZATION_TYPES } from '../domain/enums';
 import { signToken, type AuthUser } from '../middleware/authenticate';
 import { userRepository, type UserRow } from '../repositories/userRepository';
 import { badRequest, conflict, unauthorized } from '../utils/errors';
@@ -15,6 +15,8 @@ import {
   requiredInt,
   requiredString,
 } from '../utils/validation';
+
+const SELF_REGISTER_ROLES = ['DONOR', 'RECIPIENT'] as const;
 
 function toAuthUser(row: { user_id: string; email: string; name: string; role: AuthUser['role'] }): AuthUser {
   return { userId: row.user_id, email: row.email, name: row.name, role: row.role };
@@ -41,7 +43,9 @@ export const authService = {
     const email = requiredEmail(b);
     const password = requiredString(b, 'password', 200);
     if (password.length < 8) throw badRequest("'password' must be at least 8 characters.");
-    const role = requiredEnum(b, 'role', USER_ROLES);
+    // FR-1: self-registration is for donors and recipient organisations only.
+    // Administrator accounts are provisioned by the operating team (seed/DB).
+    const role = requiredEnum(b, 'role', SELF_REGISTER_ROLES);
     const phone = optionalString(b, 'phone', 40);
     const address = optionalString(b, 'address', 300);
 

@@ -33,7 +33,7 @@ export function App() {
             <Route path="/donations" element={<RequireRole role="DONOR"><DonorDonations /></RequireRole>} />
             <Route path="/donations/:id" element={<DonationDetail />} />
             <Route path="/offers" element={<RequireRole role="RECIPIENT"><MatchInbox /></RequireRole>} />
-            <Route path="/pickups" element={<Pickups />} />
+            <Route path="/pickups" element={<RequireRole role="RECIPIENT"><Pickups /></RequireRole>} />
             <Route path="/review" element={<RequireRole role="ADMIN"><AdminReview /></RequireRole>} />
             <Route path="/impact" element={
               <Suspense fallback={<div className="skeleton" style={{ height: 300 }} aria-busy="true" aria-label="Loading dashboard" />}>

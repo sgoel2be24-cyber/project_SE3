@@ -16,9 +16,11 @@ A recipient is eligible for a donation at search radius `R` only if ALL hold:
    − pendingOffers` ≥ `quantityServings`
 3. `distance ≤ min(R, recipient.serviceRadiusKm)`
 4. food compatibility: `foodPreferences` empty or contains `foodType`
-5. pickup realistic: minutes until `min(expiresAt, pickupEnd)` ≥
+5. dietary restrictions: `foodType` is not listed in the recipient's
+   `dietaryRestrictions` (SRS NFR-7)
+6. pickup realistic: minutes until `min(expiresAt, pickupEnd)` ≥
    `minPickupFeasibilityMinutes` (30)
-6. pair not excluded (recipient previously rejected this donation → excluded
+7. pair not excluded (recipient previously rejected this donation → excluded
    from the immediate retry)
 
 Violations are returned per candidate with human-readable reasons
@@ -38,7 +40,9 @@ totalScore = w_u·urgency + w_p·proximity + w_c·capacity
 ```
 
 Default weights: `urgency 0.40, proximity 0.35, capacity 0.25`
-(`models.Weights`, overridable per request via `config.weights`).
+(`models.Weights`, overridable per request via `config.weights`). The backend
+reads them from `config.matching.weights`, set by the environment variables
+`MATCH_WEIGHT_URGENCY`, `MATCH_WEIGHT_PROXIMITY`, `MATCH_WEIGHT_CAPACITY` (SRS FR-24).
 
 > These weights are **engineering parameters chosen for explainability, not
 > scientifically optimal constants**. No empirical tuning was performed.

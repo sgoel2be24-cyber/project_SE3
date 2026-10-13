@@ -72,7 +72,7 @@ also works against an older backend.
   `{bucket, days, targetSeconds, points[{bucket, medianSeconds, avgSeconds, n}]}`.
 - **Status-clarity rating.** `PUT /donations/:id/rating` with
   `{rating: 1-5, comment?}`, sent by the donor or by the recipient that
-  accepted. Averages appear in `/impact/summary` as `statusClarity`.
+  accepted, once the donation is completed. Averages appear in `/impact/summary` as `statusClarity`.
 - **Access control.** A recipient only sees donations offered to it, and only
   its own offer. Matches and pickups are visible to their two parties and to
   admins only.

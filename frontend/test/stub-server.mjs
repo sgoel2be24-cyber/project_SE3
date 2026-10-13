@@ -129,7 +129,7 @@ function route(method, seg, query, body, req) {
       if (!body?.name?.trim()) details.name = "'name' is required."
       if (!body?.email?.trim()) details.email = "'email' is required."
       if (!body?.password || body.password.length < 8) details.password = "'password' must be at least 8 characters."
-      if (!['DONOR', 'RECIPIENT', 'ADMIN'].includes(body?.role)) details.role = "'role' must be DONOR, RECIPIENT or ADMIN."
+      if (!['DONOR', 'RECIPIENT'].includes(body?.role)) details.role = "'role' must be one of: DONOR, RECIPIENT."
       if (Object.keys(details).length) fail(400, 'VALIDATION_ERROR', 'Please correct the highlighted fields.', details)
       if (db.users.some((u) => u.email === body.email)) fail(409, 'EMAIL_IN_USE', 'That email is already registered.')
       const u = seedUser(body)

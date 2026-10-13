@@ -11,11 +11,16 @@ import { matchRepository } from '../repositories/matchRepository';
 import { pickupRepository } from '../repositories/pickupRepository';
 import { waitlistRepository } from '../repositories/miscRepository';
 import { userRepository } from '../repositories/userRepository';
-import { forbidden, notFound } from '../utils/errors';
+import { ApiError, conflict, forbidden, notFound } from '../utils/errors';
 import { notificationService } from './notificationService';
 
-const WEIGHTS = { urgency: 0.4, proximity: 0.35, capacity: 0.25 }; // engineering
-// parameters (documented in docs/MATCHING_ALGORITHM.md) — NOT tuned optima.
+/** SRS FR-36: an offer past its response window cannot be answered, even if
+ *  the expiry sweep has not run yet. Refused with 409, no state change. */
+function assertOfferOpen(match: { expires_at: string | null }): void {
+  if (match.expires_at && new Date(match.expires_at).getTime() <= Date.now()) {
+    throw conflict('OFFER_EXPIRED', 'This offer has expired and can no longer be answered.');
+  }
+}
 
 async function buildMatcherRequest(
   db: Queryable,
@@ -91,7 +96,7 @@ async function buildMatcherRequest(
     pairDistances,
     config: {
       strategy,
-      weights: WEIGHTS,
+      weights: config.matching.weights,
       initialRadiusKm: config.matching.initialRadiusKm,
       maxRadiusKm: config.matching.maxRadiusKm,
       radiusStepKm: config.matching.radiusStepKm,
@@ -162,25 +167,30 @@ export const matchingService = {
    * first (greedy) or globally optimally (hungarian).
    */
   async runCycle(db: Queryable, strategyOverride?: 'greedy' | 'hungarian') {
-    const expiredDonations = await donationRepository.expireStalePosted(db);
-    const expiredMatches = await matchRepository.expireStalePending(db);
-    for (const m of expiredMatches) {
-      // Match offer timed out -> requeue the donation for this very cycle.
-      await donationRepository.updateStatus(db, m.donation_id, 'POSTED');
-      await notificationService.notify(db, m.recipient_id, 'MATCH_EXPIRED', 'A match offer expired before a response.');
-    }
+    // The whole cycle — expiry sweep, matcher call, persistence — is one
+    // transaction. If the matching service is unreachable it throws 502 and
+    // everything rolls back, so no donation state changes (SRS FR-31).
+    return withTransaction(db, async (tx) => {
+      const expiredDonations = await donationRepository.expireStalePosted(tx);
+      const expiredMatches = await matchRepository.expireStalePending(tx);
+      for (const m of expiredMatches) {
+        // Match offer timed out -> requeue the donation for this very cycle.
+        await donationRepository.updateStatus(tx, m.donation_id, 'POSTED');
+        await notificationService.notify(tx, m.recipient_id, 'MATCH_EXPIRED', 'A match offer expired before a response.');
+      }
 
-    const donations = await donationRepository.listMatchablePosted(db);
-    if (!donations.length) {
-      return { strategy: strategyOverride ?? config.matching.strategy, assignments: [], waitlisted: [], explanations: [], expiredDonations, expiredMatches };
-    }
+      const strategy = strategyOverride ?? config.matching.strategy;
+      const donations = await donationRepository.listMatchablePosted(tx);
+      if (!donations.length) {
+        return { strategy, assignments: [], waitlisted: [], explanations: [], expiredDonations, expiredMatches };
+      }
 
-    const strategy = strategyOverride ?? config.matching.strategy;
-    const request = await buildMatcherRequest(db, donations, strategy);
-    const result = await runMatchingCycle(request);
-    await persistResult(db, result, new Map(donations.map((d) => [d.donation_id, d])));
+      const request = await buildMatcherRequest(tx, donations, strategy);
+      const result = await runMatchingCycle(request);
+      await persistResult(tx, result, new Map(donations.map((d) => [d.donation_id, d])));
 
-    return { ...result, expiredDonations, expiredMatches };
+      return { ...result, expiredDonations, expiredMatches };
+    });
   },
 
   /** Recipient accepts a PENDING match offer (spec §12): Match -> ACCEPTED,
@@ -191,6 +201,7 @@ export const matchingService = {
       if (!match) throw notFound(`Match '${matchId}' not found.`);
       if (match.recipient_id !== recipientUserId) throw forbidden('This match belongs to another recipient.');
       assertInStatus('match', match.status, ['PENDING'], 'accept');
+      assertOfferOpen(match);
 
       const donation = await donationRepository.findByIdForUpdate(tx, match.donation_id);
       if (!donation) throw notFound('Donation for this match no longer exists.');
@@ -231,6 +242,7 @@ export const matchingService = {
       if (!match) throw notFound(`Match '${matchId}' not found.`);
       if (match.recipient_id !== recipientUserId) throw forbidden('This match belongs to another recipient.');
       assertInStatus('match', match.status, ['PENDING'], 'reject');
+      assertOfferOpen(match);
 
       assertMatchTransition(match.status, 'REJECTED');
       await matchRepository.setStatus(tx, matchId, 'REJECTED', true);
@@ -248,9 +260,18 @@ export const matchingService = {
     });
 
     // Requeue matching for this donation (rejected recipient now excluded).
-    const cycle = await this.runCycle(db);
+    // The rejection itself is already committed; if the matching service is
+    // down the donation simply waits, POSTED, for the next cycle.
+    let cycle: unknown = null;
+    let matcherError: string | null = null;
+    try {
+      cycle = await this.runCycle(db);
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.statusCode !== 502) throw err;
+      matcherError = err.message;
+    }
     const newMatch = (await matchRepository.listByDonation(db, donationId)).find((m) => m.status === 'PENDING') ?? null;
-    return { donationId, rematched: newMatch !== null, newMatch, cycle };
+    return { donationId, rematched: newMatch !== null, newMatch, cycle, matcherError };
   },
 
   /** Match offers that expired without a response (spec §12): Match -> EXPIRED,

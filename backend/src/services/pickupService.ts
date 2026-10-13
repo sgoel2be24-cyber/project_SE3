@@ -25,6 +25,13 @@ function assertParty(actor: Actor, recipientId: string, donorId: string): void {
   throw forbidden('This pickup belongs to another donation or organisation.');
 }
 
+/** SRS BR-4 / FR-39 / FR-40: only the collecting organisation records
+ *  collection and confirms receipt. */
+function assertCollector(actor: Actor, recipientId: string): void {
+  if (actor.role === 'RECIPIENT' && recipientId === actor.userId) return;
+  throw forbidden('Only the collecting organisation can update this pickup.');
+}
+
 export const pickupService = {
   async listMine(db: Queryable, userId: string, role: string) {
     if (role === 'RECIPIENT') return pickupRepository.listForRecipient(db, userId);
@@ -51,7 +58,7 @@ export const pickupService = {
       if (!match) throw notFound('Match for this pickup no longer exists.');
       const donation = await donationRepository.findByIdForUpdate(tx, match.donation_id);
       if (!donation) throw notFound('Donation for this pickup no longer exists.');
-      assertParty(actor, match.recipient_id, donation.donor_id);
+      assertCollector(actor, match.recipient_id);
 
       assertPickupTransition(pickup.status, 'PICKED_UP');
       assertDonationTransition(donation.status, 'PICKED_UP');
@@ -75,7 +82,7 @@ export const pickupService = {
       if (!match) throw notFound('Match for this pickup no longer exists.');
       const donation = await donationRepository.findByIdForUpdate(tx, match.donation_id);
       if (!donation) throw notFound('Donation for this pickup no longer exists.');
-      assertParty(actor, match.recipient_id, donation.donor_id);
+      assertCollector(actor, match.recipient_id);
 
       assertPickupTransition(pickup.status, 'COMPLETED');
       assertDonationTransition(donation.status, 'COMPLETED');

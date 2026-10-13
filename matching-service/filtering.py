@@ -87,6 +87,12 @@ def ineligibility_reasons(
     if recipient.foodPreferences and donation.foodType not in recipient.foodPreferences:
         reasons.append(f"does not accept food type '{donation.foodType}'")
 
+    # SRS NFR-7: a recipient's declared dietary restrictions list food types it
+    # must never be sent; this is a hard constraint, checked before scoring.
+    restricted = {r.strip().lower() for r in recipient.dietaryRestrictions}
+    if donation.foodType.strip().lower() in restricted:
+        reasons.append(f"dietary restriction excludes food type '{donation.foodType}'")
+
     window = _pickup_window_minutes(donation, now)
     if window < config.minPickupFeasibilityMinutes:
         reasons.append(

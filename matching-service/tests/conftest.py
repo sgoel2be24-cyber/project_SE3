@@ -53,6 +53,7 @@ def make_recipient(
     radius: float = 25.0,
     prefs: tuple = (),
     active: bool = True,
+    restrictions: tuple = (),
 ) -> RecipientIn:
     return RecipientIn(
         recipientId=recipient_id,
@@ -63,7 +64,7 @@ def make_recipient(
         assignedServings=assigned,
         serviceRadiusKm=radius,
         foodPreferences=list(prefs),
-        dietaryRestrictions=[],
+        dietaryRestrictions=list(restrictions),
         active=active,
     )
 

@@ -19,6 +19,9 @@
 const BASE = (process.argv.find((a) => a.startsWith('http')) ?? 'http://localhost:3000').replace(/\/$/, '')
 const STAMP = Date.now().toString(36)
 const PASSWORD = 'Password123!'
+// Admins are not self-registered (SRS FR-1); use the seeded demo admin.
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? 'admin@foodbridge.local'
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? 'Password123!'
 
 const DONATION_STATUSES = ['PENDING_REVIEW', 'POSTED', 'REJECTED', 'MATCHED', 'PICKED_UP', 'COMPLETED', 'CANCELLED', 'EXPIRED']
 const MATCH_STATUSES = ['PENDING', 'ACCEPTED', 'REJECTED', 'EXPIRED']
@@ -167,12 +170,18 @@ await check('GET /api/donations/:id 404s on an unknown id', async () => {
   return json.error.code
 })
 
-await check('Admin can register and read the review queue', async () => {
+await check('Admin accounts cannot be self-registered', async () => {
   const reg = await call('POST', '/auth/register', {
     body: { name: 'Contract Admin', email: `admin+${STAMP}@check.local`, password: PASSWORD, role: 'ADMIN' },
   })
-  must(reg.status === 201, `admin register expected 201, got ${reg.status}`)
-  ctx.admin = reg.json.token
+  must(reg.status === 400, `admin self-register expected 400, got ${reg.status}`)
+  return 'refused'
+})
+
+await check('Seeded admin can sign in and read the review queue', async () => {
+  const login = await call('POST', '/auth/login', { body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD } })
+  must(login.status === 200, `admin login expected 200, got ${login.status} — run "npm --prefix backend run seed" first`)
+  ctx.admin = login.json.token
   const { status, json } = await call('GET', '/admin/donations/pending', { token: ctx.admin })
   must(status === 200, `expected 200, got ${status}`)
   has(json, 'donations')

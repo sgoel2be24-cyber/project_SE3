@@ -60,6 +60,18 @@ class TestHardFilters:
         assert res.assignments == []
         assert any("food type" in r for c in res.explanations[0].candidates for r in c.reasons)
 
+    def test_dietary_restriction_filtered(self):
+        # SRS NFR-7: accepts everything (no prefs) but declares a restriction
+        restricted = [make_recipient("rec-nodairy", HUB[0], HUB[1], restrictions=("DAIRY",))]
+        res = greedy_match(make_request([make_donation("d1", food="dairy")], restricted))
+        assert res.assignments == []
+        assert any("dietary restriction" in r for c in res.explanations[0].candidates for r in c.reasons)
+
+    def test_dietary_restriction_does_not_block_other_food(self):
+        restricted = [make_recipient("rec-nodairy", HUB[0], HUB[1], restrictions=("dairy",))]
+        res = greedy_match(make_request([make_donation("d1", food="cooked_meals")], restricted))
+        assert len(res.assignments) == 1
+
     def test_spatial_radius_filter(self):
         far = [make_recipient("rec-far", 13.5, 78.0, radius=50)]  # > 60 km away
         res = greedy_match(make_request([make_donation("d1")], far))

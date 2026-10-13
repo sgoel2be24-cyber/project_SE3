@@ -257,18 +257,30 @@ describe('waitlist + hungarian strategy + impact', () => {
   });
 
   it('impact summary is computed from real rows (TTM, meals, unmatched, expired)', async () => {
-    // Make TTM genuinely measurable: approve, backdate posted_at by 1 h, then match.
+    // Make TTM genuinely measurable (FR-46: submission -> first accepted
+    // offer): approve, backdate submitted_at by 1 h, match, then accept.
     const ttmDonationId = await createAndApprove(8);
     await testPool().query(
-      `UPDATE donations SET posted_at = now() - interval '1 hour' WHERE donation_id = $1`,
+      `UPDATE donations SET submitted_at = now() - interval '1 hour' WHERE donation_id = $1`,
       [ttmDonationId],
     );
     await request(app).post('/api/admin/matching/run').set('Authorization', `Bearer ${adminToken}`).send({});
 
-    // per-donation TTM must be ~1 hour for the backdated donation
     const detail = await request(app).get(`/api/donations/${ttmDonationId}`).set('Authorization', `Bearer ${donorToken}`);
+    const offer = detail.body.matches.find((m: { status: string }) => m.status === 'PENDING');
+    expect(offer).toBeTruthy();
+    let accepted = false;
+    for (const token of [hopeToken, sunriseToken, greenToken]) {
+      const r = await request(app).post(`/api/matches/${offer.match_id}/accept`).set('Authorization', `Bearer ${token}`);
+      if (r.status === 200) { accepted = true; break; }
+    }
+    expect(accepted).toBe(true);
+
+    // per-donation TTM must be ~1 hour for the backdated donation
+    const after = await request(app).get(`/api/donations/${ttmDonationId}`).set('Authorization', `Bearer ${donorToken}`);
+    const acceptedOffer = after.body.matches.find((m: { status: string }) => m.status === 'ACCEPTED');
     const ttmSeconds =
-      (new Date(detail.body.donation.matched_at).getTime() - new Date(detail.body.donation.posted_at).getTime()) / 1000;
+      (new Date(acceptedOffer.responded_at).getTime() - new Date(after.body.donation.submitted_at).getTime()) / 1000;
     expect(ttmSeconds).toBeGreaterThan(3500);
     expect(ttmSeconds).toBeLessThan(3700);
 

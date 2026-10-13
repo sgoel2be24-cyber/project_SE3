@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ensureMigrated, makeApp, PASSWORD, resetWithFixtures, teardown } from './helpers';
+import { ensureMigrated, makeApp, PASSWORD, resetWithFixtures, teardown, testPool } from './helpers';
 
 /**
  * Backend refinements for frontend integration:
@@ -124,9 +124,55 @@ describe('access control', () => {
     expect((await request(app).get(`/api/pickups/${pickupId}`).set(as('donor2@test.local'))).status).toBe(403);
     expect((await request(app).post(`/api/pickups/${pickupId}/picked-up`).set(as('donor2@test.local'))).status).toBe(403);
 
-    // the actual parties still can
+    // the donation's own donor can read it, but only the collecting
+    // organisation records collection (SRS BR-4)
     expect((await request(app).get(`/api/pickups/${pickupId}`).set(as('donor@test.local'))).status).toBe(200);
+    expect((await request(app).post(`/api/pickups/${pickupId}/picked-up`).set(as('donor@test.local'))).status).toBe(403);
     expect((await request(app).post(`/api/pickups/${pickupId}/picked-up`).set(as(owner))).status).toBe(200);
+    expect((await request(app).post(`/api/pickups/${pickupId}/complete`).set(as('donor@test.local'))).status).toBe(403);
+  });
+});
+
+describe('SRS conformance fixes', () => {
+  it('FR-1: an ADMIN account cannot be self-registered', async () => {
+    const res = await request(app).post('/api/auth/register').send({
+      name: 'Sneaky', email: 'sneaky@test.local', password: PASSWORD, role: 'ADMIN',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('FR-10: a deadline in the past or a non-positive hour count is refused, naming the field', async () => {
+    const base = { foodType: 'cooked_meals', quantityServings: 5, latitude: 12.9716, longitude: 77.5946 };
+    const past = await request(app).post('/api/donations').set(as('donor@test.local'))
+      .send({ ...base, expiresAt: new Date(Date.now() - 60_000).toISOString() });
+    expect(past.status).toBe(400);
+    expect(past.body.error.details).toHaveProperty('expiresAt');
+
+    for (const bad of [0, -3, 'abc']) {
+      const r = await request(app).post('/api/donations').set(as('donor@test.local')).send({ ...base, expiresInHours: bad });
+      expect(r.status).toBe(400);
+      expect(r.body.error.details).toHaveProperty('expiresInHours');
+    }
+  });
+
+  it('FR-36: an offer past its response window cannot be accepted or rejected', async () => {
+    const { matchId, owner } = await createApproveAndMatch(4);
+    await testPool().query(`UPDATE matches SET expires_at = now() - interval '1 minute' WHERE match_id = $1`, [matchId]);
+
+    const accept = await request(app).post(`/api/matches/${matchId}/accept`).set(as(owner));
+    expect(accept.status).toBe(409);
+    expect(accept.body.error.code).toBe('OFFER_EXPIRED');
+    const reject = await request(app).post(`/api/matches/${matchId}/reject`).set(as(owner));
+    expect(reject.status).toBe(409);
+
+    // no state change: the offer is still PENDING until the sweep expires it
+    const m = await testPool().query<{ status: string }>('SELECT status FROM matches WHERE match_id = $1', [matchId]);
+    expect(m.rows[0]!.status).toBe('PENDING');
+
+    // the next cycle's sweep expires it and frees the donation
+    await request(app).post('/api/admin/matching/run').set(as('admin@test.local')).send({});
+    const after = await testPool().query<{ status: string }>('SELECT status FROM matches WHERE match_id = $1', [matchId]);
+    expect(after.rows[0]!.status).toBe('EXPIRED');
   });
 });
 
@@ -150,13 +196,22 @@ describe('impact: time-to-match trend', () => {
 });
 
 describe('status-clarity ratings', () => {
-  it('donor and accepting recipient can rate 1-5; re-rating replaces; summary reports averages', async () => {
+  it('donor and accepting recipient can rate 1-5 after completion; re-rating replaces; summary reports averages', async () => {
     const { donationId, matchId, owner } = await createApproveAndMatch(6);
     const outsider = RECIPIENTS.find((e) => e !== owner)!;
 
     // recipient must have accepted before rating
     expect((await request(app).put(`/api/donations/${donationId}/rating`).set(as(owner)).send({ rating: 4 })).status).toBe(403);
-    await request(app).post(`/api/matches/${matchId}/accept`).set(as(owner));
+    const accept = await request(app).post(`/api/matches/${matchId}/accept`).set(as(owner));
+    const pickupId = accept.body.pickup.pickup_id as string;
+
+    // FR-49: not before completion
+    const early = await request(app).put(`/api/donations/${donationId}/rating`).set(as('donor@test.local')).send({ rating: 3 });
+    expect(early.status).toBe(409);
+    expect(early.body.error.code).toBe('NOT_COMPLETED');
+
+    await request(app).post(`/api/pickups/${pickupId}/picked-up`).set(as(owner));
+    await request(app).post(`/api/pickups/${pickupId}/complete`).set(as(owner));
 
     const r1 = await request(app).put(`/api/donations/${donationId}/rating`).set(as(owner)).send({ rating: 4 });
     expect(r1.status).toBe(200);

@@ -6,7 +6,7 @@ import { pickupRepository } from '../repositories/pickupRepository';
 import { ratingRepository } from '../repositories/ratingRepository';
 import { reviewRepository } from '../repositories/reviewRepository';
 import { userRepository } from '../repositories/userRepository';
-import { forbidden, notFound } from '../utils/errors';
+import { badRequest, conflict, forbidden, notFound } from '../utils/errors';
 import {
   asObject,
   optionalString,
@@ -37,14 +37,23 @@ export const donationService = {
     const pickupAddress = optionalString(b, 'pickupAddress', 300);
     const latitude = optionalNumber(b, 'latitude', -90, 90);
     const longitude = optionalNumber(b, 'longitude', -180, 180);
-    const expiresAt =
-      b.expiresInHours !== undefined
-        ? new Date(Date.now() + Number(b.expiresInHours) * 3_600_000)
-        : (() => {
-            const d = optionalTimestamp(b, 'expiresAt');
-            if (!d) return new Date(Date.now() + 4 * 3_600_000); // default 4 h window
-            return d;
-          })();
+    // FR-9/FR-10: deadline as hours-from-now or an absolute timestamp, and it
+    // must lie in the future. The offending field is named in the error.
+    let expiresAt: Date;
+    if (b.expiresInHours !== undefined) {
+      const hours = b.expiresInHours;
+      if (typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0 || hours > 168) {
+        const msg = "'expiresInHours' must be a number greater than 0 (at most 168).";
+        throw badRequest(msg, { expiresInHours: msg });
+      }
+      expiresAt = new Date(Date.now() + hours * 3_600_000);
+    } else {
+      expiresAt = optionalTimestamp(b, 'expiresAt') ?? new Date(Date.now() + 4 * 3_600_000); // default 4 h window
+      if (expiresAt.getTime() <= Date.now()) {
+        const msg = "'expiresAt' must be in the future.";
+        throw badRequest(msg, { expiresAt: msg });
+      }
+    }
     const pickupStart = optionalTimestamp(b, 'pickupStart');
     const pickupEnd = optionalTimestamp(b, 'pickupEnd');
 
@@ -101,8 +110,9 @@ export const donationService = {
 
   /**
    * Status-clarity rating (proposal secondary metric): the donation's donor,
-   * or a recipient that accepted it, rates 1–5 how clear the status timeline
-   * was. Re-rating replaces the earlier score.
+   * or the recipient that accepted it, rates 1–5 how clear the status timeline
+   * was, once the donation is COMPLETED (SRS FR-49). Re-rating replaces the
+   * earlier score.
    */
   async rateStatus(db: Queryable, donationId: string, actor: { userId: string; role: string }, body: unknown) {
     const b = asObject(body);
@@ -120,6 +130,12 @@ export const donationService = {
       if (!tookPart) throw forbidden('Only the organisation that accepted this donation can rate it.');
     } else {
       throw forbidden('Only donors and recipients rate status clarity.');
+    }
+
+    // FR-49: the rating is collected after completion, when both parties
+    // have seen the whole timeline.
+    if (donation.status !== 'COMPLETED') {
+      throw conflict('NOT_COMPLETED', 'A donation can be rated only after it has been completed.');
     }
 
     return ratingRepository.upsert(db, {
